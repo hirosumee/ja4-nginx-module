@@ -1,24 +1,8 @@
 FROM alpine:3.18
 
-ARG NGINX_VERSION=1.25.0
-ARG OPENSSL_VERSION=3.2.1
-
-RUN apk add --no-cache \
-    gcc \
-    libc-dev \
-    make \
-    openssl-dev \
-    pcre-dev \
-    zlib-dev \
-    wget \
-    perl-dev \
-    linux-headers
-
-WORKDIR /tmp
-
-# 1. Download OpenSSL (Standard)
-RUN wget https://github.com/openssl/openssl/releases/download/openssl-${OPENSSL_VERSION}/openssl-${OPENSSL_VERSION}.tar.gz && \
-    tar -zxf openssl-${OPENSSL_VERSION}.tar.gz
+# 1. Download OpenSSL (Standard) - REMOVED, using system openssl-dev
+# RUN wget https://github.com/openssl/openssl/releases/download/openssl-${OPENSSL_VERSION}/openssl-${OPENSSL_VERSION}.tar.gz && \
+#    tar -zxf openssl-${OPENSSL_VERSION}.tar.gz
 
 # 2. Download Nginx (Standard)
 RUN wget https://nginx.org/download/nginx-${NGINX_VERSION}.tar.gz && \
@@ -31,9 +15,8 @@ COPY . /tmp/ja4_nopatch
 WORKDIR /tmp/nginx-${NGINX_VERSION}
 
 # Note: We point --add-module to our copied directory
-# We use standard OpenSSL
+# We use system OpenSSL (from openssl-dev)
 RUN ./configure \
-    --with-openssl=/tmp/openssl-${OPENSSL_VERSION} \
     --with-debug \
     --with-compat \
     --add-module=/tmp/ja4_nopatch \
