@@ -8,6 +8,15 @@
 #include <string.h>
 #include "ngx_http_ja4_module.h"
 
+#if (NGX_GCC)
+#pragma GCC diagnostic ignored "-Wdeclaration-after-statement"
+#pragma GCC diagnostic ignored "-Wunused-variable"
+#pragma GCC diagnostic ignored "-Wunused-function"
+#endif
+
+// Global index for storing our context in SSL object
+int ngx_ja4_ssl_ex_index = -1;
+
 // Forward declarations
 static ngx_int_t ngx_http_ja4_add_variables(ngx_conf_t *cf);
 static void *ngx_http_ja4_create_srv_conf(ngx_conf_t *cf);
@@ -16,8 +25,6 @@ static ngx_int_t ngx_http_ja4_init(ngx_conf_t *cf);
 
 static ngx_int_t ngx_http_ja4_variable(ngx_http_request_t *r, ngx_http_variable_value_t *v, uintptr_t data);
 
-// Global index for storing our context in SSL object
-static int ngx_ja4_ssl_ex_index = -1;
 
 // Grease and Ignore lists (copied from original)
 static const char *GREASE[] = {
@@ -144,9 +151,12 @@ int ngx_ja4_client_hello_cb(SSL *s, int *al, void *arg) {
 #define NGX_HTTP_JA4_ALLOW 1
 #define NGX_HTTP_JA4_DENY  2
 
+// Forward declarations
 static char *ngx_http_ja4_handler(ngx_conf_t *cf, ngx_command_t *cmd, void *conf);
 static ngx_int_t ngx_http_ja4_access_handler(ngx_http_request_t *r);
 void ngx_ja4_calculate(ngx_connection_t *c, ngx_ssl_ja4_t *ja4);
+void ngx_ja4h_calculate(ngx_http_request_t *r, ngx_ssl_ja4h_t *ja4h);
+void ngx_ja4one_calculate(ngx_http_request_t *r, ngx_ssl_ja4one_t *ja4one);
 
 // Module Directives
 static ngx_command_t ngx_http_ja4_commands[] = {
@@ -235,8 +245,6 @@ static void *ngx_http_ja4_create_srv_conf(ngx_conf_t *cf) {
     conf = ngx_pcalloc(cf->pool, sizeof(ngx_http_ja4_srv_conf_t));
     if (conf == NULL) return NULL;
     conf->enable = NGX_CONF_UNSET;
-    // Arrays will be allocated on demand or we can init here? 
-    // Usually on demand in handler is fine, or here.
     return conf;
 }
 
@@ -246,16 +254,9 @@ static char *ngx_http_ja4_merge_srv_conf(ngx_conf_t *cf, void *parent, void *chi
     
     ngx_conf_merge_value(conf->enable, prev->enable, 0);
     
-    // Merge rules? Usually we inherit if child is empty.
-    if (conf->rules == NULL) {
-        conf->rules = prev->rules;
-    }
-    if (conf->rules_h == NULL) {
-        conf->rules_h = prev->rules_h;
-    }
-     if (conf->rules_one == NULL) {
-        conf->rules_one = prev->rules_one;
-    }
+    if (conf->rules == NULL) conf->rules = prev->rules;
+    if (conf->rules_h == NULL) conf->rules_h = prev->rules_h;
+    if (conf->rules_one == NULL) conf->rules_one = prev->rules_one;
 
     return NGX_CONF_OK;
 }
@@ -268,13 +269,11 @@ static char *ngx_http_ja4_handler(ngx_conf_t *cf, ngx_command_t *cmd, void *conf
     
     value = cf->args->elts;
     
-    // Determine which array to use based on directive name
     if (ngx_strstr(cmd->name.data, (u_char *)"ja4h_")) {
         rules_ptr = &jcf->rules_h;
     } else if (ngx_strstr(cmd->name.data, (u_char *)"ja4one_")) {
         rules_ptr = &jcf->rules_one;
     } else {
-        // default ja4_
         rules_ptr = &jcf->rules;
     }
     
@@ -301,9 +300,11 @@ static char *ngx_http_ja4_handler(ngx_conf_t *cf, ngx_command_t *cmd, void *conf
     return NGX_CONF_OK;
 }
 
-// Variables
+
 static ngx_http_variable_t  ngx_http_ja4_vars[] = {
     { ngx_string("http_ssl_ja4"), NULL, ngx_http_ja4_variable, 0, 0, 0 },
+    { ngx_string("http_ssl_ja4h"), NULL, ngx_http_ja4_variable, 1, 0, 0 },
+    { ngx_string("http_ssl_ja4one"), NULL, ngx_http_ja4_variable, 2, 0, 0 },
     { ngx_null_string, NULL, NULL, 0, 0, 0 }
 };
 
@@ -318,8 +319,12 @@ static ngx_int_t ngx_http_ja4_add_variables(ngx_conf_t *cf) {
     return NGX_OK;
 }
 
-// Initialization and Hooking
 static ngx_int_t ngx_http_ja4_init(ngx_conf_t *cf) {
+    ngx_http_core_main_conf_t *cmcf;
+    ngx_http_handler_pt *h;
+    ngx_http_core_srv_conf_t **cscfp;
+    ngx_uint_t s;
+
     // 1. Get global ex index
     ngx_ja4_ssl_ex_index = SSL_get_ex_new_index(0, NULL, NULL, NULL, NULL);
     if (ngx_ja4_ssl_ex_index == -1) {
@@ -328,8 +333,7 @@ static ngx_int_t ngx_http_ja4_init(ngx_conf_t *cf) {
     }
 
     // 2. Add Access Phase Handler
-    ngx_http_core_main_conf_t *cmcf = ngx_http_conf_get_module_main_conf(cf, ngx_http_core_module);
-    ngx_http_handler_pt *h;
+    cmcf = ngx_http_conf_get_module_main_conf(cf, ngx_http_core_module);
     
     h = ngx_array_push(&cmcf->phases[NGX_HTTP_ACCESS_PHASE].handlers);
     if (h == NULL) {
@@ -337,13 +341,10 @@ static ngx_int_t ngx_http_ja4_init(ngx_conf_t *cf) {
     }
     *h = ngx_http_ja4_access_handler;
 
-
     // 3. Iterate servers and add ClientHello Callback
-    ngx_http_core_srv_conf_t **cscfp = cmcf->servers.elts;
-    ngx_uint_t s;
+    cscfp = cmcf->servers.elts;
 
     for (s = 0; s < cmcf->servers.nelts; s++) {
-        // We need to access the SSL module config for this server
          ngx_http_ssl_srv_conf_t *sscf = cscfp[s]->ctx->srv_conf[ngx_http_ssl_module.ctx_index];
          
          if (sscf && sscf->ssl.ctx) {
@@ -356,13 +357,10 @@ static ngx_int_t ngx_http_ja4_init(ngx_conf_t *cf) {
 static ngx_int_t ngx_http_ja4_access_handler(ngx_http_request_t *r) {
     ngx_http_ja4_srv_conf_t *jcf;
     
-    // Check if SSL
-    if (!r->connection || !r->connection->ssl) return NGX_DECLINED;
-
     jcf = ngx_http_get_module_srv_conf(r, ngx_http_ja4_module);
     
-    // Check JA4 Rules
-    if (jcf->rules) {
+    // 1. JA4 Checks (Only if SSL)
+    if (r->connection->ssl && jcf->rules) {
         ngx_ja4_ssl_ctx_t *ctx;
         ngx_uint_t i;
         ngx_http_ja4_rule_t *rules;
@@ -371,7 +369,6 @@ static ngx_int_t ngx_http_ja4_access_handler(ngx_http_request_t *r) {
         u_char *last;
         ngx_str_t fp;
 
-        // Need to calculate JA4 fingerprint first
         ssl = r->connection->ssl->connection;
         ctx = SSL_get_ex_data(ssl, ngx_ja4_ssl_ex_index);
         
@@ -380,8 +377,6 @@ static ngx_int_t ngx_http_ja4_access_handler(ngx_http_request_t *r) {
                 ngx_ja4_calculate(r->connection, ctx->ja4_data);
             }
              
-            // Format Output for comparison
-            
             last = ngx_snprintf(buf, 64, "%c%s%c%02d%02d_%s_%s",
                 ctx->ja4_data->transport,
                 ctx->ja4_data->version,
@@ -403,16 +398,272 @@ static ngx_int_t ngx_http_ja4_access_handler(ngx_http_request_t *r) {
                          ngx_log_error(NGX_LOG_ERR, r->connection->log, 0, "access forbidden by JA4: %V", &fp);
                          return NGX_HTTP_FORBIDDEN;
                      }
-                     // If allow match, allow access
-                     return NGX_OK; 
-                 }
-            }
+                  }
+             }
         }
     }
     
-    // TODO: JA4H and JA4one checks would go here similarly
+    // 2. JA4H Checks
+    if (jcf->rules_h) {
+        ngx_ssl_ja4h_t ja4h;
+        u_char buf[65];
+        u_char *last;
+        ngx_str_t fp;
+        ngx_uint_t i;
+        ngx_http_ja4_rule_t *rules;
+        
+        ngx_memzero(&ja4h, sizeof(ngx_ssl_ja4h_t));
+        
+        ngx_ja4h_calculate(r, &ja4h);
+        
+        last = ngx_snprintf(buf, 64, "%s%s%c%02d_%s", 
+            ja4h.method, ja4h.version, ja4h.cookie, ja4h.header_count, ja4h.header_hash);
+        *last = '\0';
+        
+        fp.data = buf;
+        fp.len = last - buf;
+        
+        rules = jcf->rules_h->elts;
+        
+        for (i = 0; i < jcf->rules_h->nelts; i++) {
+             if (rules[i].name.len == fp.len && ngx_strncmp(rules[i].name.data, fp.data, fp.len) == 0) {
+                 if (rules[i].type == NGX_HTTP_JA4_DENY) {
+                     ngx_log_error(NGX_LOG_ERR, r->connection->log, 0, "access forbidden by JA4H: %V", &fp);
+                     return NGX_HTTP_FORBIDDEN;
+                 }
+             }
+        }
+    }
+
+    // 3. JA4one Checks
+    if (jcf->rules_one) {
+        ngx_ssl_ja4one_t ja4one;
+        ngx_str_t fp;
+        ngx_uint_t i;
+        ngx_http_ja4_rule_t *rules;
+
+        ngx_ja4one_calculate(r, &ja4one);
+        
+        fp.data = (u_char*)ja4one.fingerprint;
+        fp.len = ngx_strlen(ja4one.fingerprint);
+        
+        rules = jcf->rules_one->elts;
+         for (i = 0; i < jcf->rules_one->nelts; i++) {
+             if (rules[i].name.len == fp.len && ngx_strncmp(rules[i].name.data, fp.data, fp.len) == 0) {
+                 if (rules[i].type == NGX_HTTP_JA4_DENY) {
+                     ngx_log_error(NGX_LOG_ERR, r->connection->log, 0, "access forbidden by JA4one: %V", &fp);
+                     return NGX_HTTP_FORBIDDEN;
+                 }
+             }
+        }
+    }
     
     return NGX_DECLINED;
+}
+    
+
+// Variables
+
+// ... (existing code for add_variables)
+
+static ngx_int_t ngx_http_ja4_variable(ngx_http_request_t *r, ngx_http_variable_value_t *v, uintptr_t data) {
+    ngx_ja4_ssl_ctx_t *ctx;
+    u_char *p;
+    u_char *last;
+    
+    if (data == 0) { // JA4
+        SSL *ssl;
+        
+        if (!r->connection || !r->connection->ssl) return NGX_OK; // Return empty if not SSL
+
+        ssl = r->connection->ssl->connection;
+        ctx = SSL_get_ex_data(ssl, ngx_ja4_ssl_ex_index);
+        
+        if (!ctx || !ctx->ja4_data) {
+            v->not_found = 1;
+            return NGX_OK;
+        }
+        
+        if ((uintptr_t)ctx->ja4_data->highest_supported_tls_client_version < 65535) {
+            ngx_ja4_calculate(r->connection, ctx->ja4_data);
+        }
+        
+        p = ngx_pnalloc(r->pool, 64);
+        if (p == NULL) return NGX_ERROR;
+        
+        last = ngx_snprintf(p, 64, "%c%s%c%02d%02d_%s_%s",
+            ctx->ja4_data->transport,
+            ctx->ja4_data->version,
+            ctx->ja4_data->has_sni,
+            (int)ctx->ja4_data->ciphers_sz,
+            (int)ctx->ja4_data->extensions_sz,
+            ctx->ja4_data->cipher_hash_truncated,
+            ctx->ja4_data->extension_hash_truncated
+        );
+        
+        v->len = last - p;
+        v->data = p;
+        v->valid = 1;
+        v->no_cacheable = 0;
+        v->not_found = 0;
+        return NGX_OK;
+    }
+    else if (data == 1) { // JA4H
+        ngx_ssl_ja4h_t ja4h;
+        ngx_memzero(&ja4h, sizeof(ngx_ssl_ja4h_t));
+        
+        ngx_ja4h_calculate(r, &ja4h);
+        
+        p = ngx_pnalloc(r->pool, 64);
+        if (p == NULL) return NGX_ERROR;
+        // MMVVCHH_HHHH...
+        last = ngx_snprintf(p, 64, "%s%s%c%02d_%s", 
+            ja4h.method, ja4h.version, ja4h.cookie, ja4h.header_count, ja4h.header_hash);
+            
+        v->len = last - p;
+        v->data = p;
+        v->valid = 1;
+        v->no_cacheable = 0;
+        v->not_found = 0;
+        return NGX_OK;
+    }
+    else if (data == 2) { // JA4one
+         ngx_ssl_ja4one_t ja4one;
+         ngx_ja4one_calculate(r, &ja4one);
+         
+         p = ngx_pnalloc(r->pool, 64);
+         if (p == NULL) return NGX_ERROR;
+         
+         last = ngx_snprintf(p, 64, "%s", ja4one.fingerprint);
+         v->len = last - p;
+         v->data = p;
+         v->valid = 1;
+         v->no_cacheable = 0;
+         v->not_found = 0;
+         return NGX_OK;
+    }
+    
+    return NGX_ERROR;
+}
+
+// ... (access handler updates will come in next step or I can do it here logic-wise)
+// I will keep access handler logic separate for clarity if possible, or merge it. 
+// The prompt asked for "JA4H Calculation Logic".
+
+// --- CALCULATION LOGIC ---
+
+void ngx_ja4h_calculate(ngx_http_request_t *r, ngx_ssl_ja4h_t *ja4h) {
+    // 1. Method
+    if (r->method & NGX_HTTP_GET) ngx_memcpy(ja4h->method, "ge", 2);
+    else if (r->method & NGX_HTTP_POST) ngx_memcpy(ja4h->method, "po", 2);
+    else if (r->method & NGX_HTTP_PUT) ngx_memcpy(ja4h->method, "pu", 2);
+    else if (r->method & NGX_HTTP_DELETE) ngx_memcpy(ja4h->method, "de", 2);
+    else if (r->method & NGX_HTTP_HEAD) ngx_memcpy(ja4h->method, "he", 2);
+    else if (r->method & NGX_HTTP_OPTIONS) ngx_memcpy(ja4h->method, "op", 2);
+    else if (r->method & NGX_HTTP_TRACE) ngx_memcpy(ja4h->method, "tr", 2);
+    else if (r->method & NGX_HTTP_PATCH) ngx_memcpy(ja4h->method, "pa", 2);
+    else ngx_memcpy(ja4h->method, "xx", 2);
+    
+    // 2. Version
+    if (r->http_version == NGX_HTTP_VERSION_11) ngx_memcpy(ja4h->version, "11", 2);
+    else if (r->http_version == NGX_HTTP_VERSION_10) ngx_memcpy(ja4h->version, "10", 2);
+    else if (r->http_version == NGX_HTTP_VERSION_20) ngx_memcpy(ja4h->version, "20", 2);
+    else if (r->http_version == NGX_HTTP_VERSION_30) ngx_memcpy(ja4h->version, "30", 2);
+    else ngx_memcpy(ja4h->version, "00", 2);
+    
+// 2. Cookie & 4. Headers
+    {
+    ngx_list_part_t *part = &r->headers_in.headers.part;
+    ngx_table_elt_t *h = part->elts;
+    ngx_uint_t i;
+    SHA256_CTX sha256;
+    unsigned char hash[SHA256_DIGEST_LENGTH];
+    int first = 1;
+
+    ja4h->cookie = 'n';
+    ja4h->header_count = 0;
+    
+    // For hashing
+    SHA256_Init(&sha256);
+    
+    for (i = 0; /* void */; i++) {
+        if (i >= part->nelts) {
+            if (part->next == NULL) break;
+            part = part->next;
+            h = part->elts;
+            i = 0;
+        }
+        
+        // Check for Cookie
+        if (h[i].key.len == 6 && ngx_strncasecmp(h[i].key.data, (u_char *)"Cookie", 6) == 0) {
+            ja4h->cookie = 'c';
+        }
+        
+        // Add to Hash (Key only)
+        if (!first) {
+            SHA256_Update(&sha256, ",", 1);
+        }
+        SHA256_Update(&sha256, h[i].key.data, h[i].key.len);
+        first = 0;
+        
+        ja4h->header_count++;
+    }
+    
+    
+    
+    SHA256_Final(hash, &sha256);
+    ngx_hex_dump((u_char*)ja4h->header_hash, hash, 32); // Full SHA256 (64 chars)
+    }
+}
+
+void ngx_ja4one_calculate(ngx_http_request_t *r, ngx_ssl_ja4one_t *ja4one) {
+    // Placeholder logic for JA4one: Hash(JA4H + JA4)
+    // For now purely experimental
+    char ja4_part[128] = "";
+    char ja4h_part[128];
+    
+    u_char *last;
+    
+    // 1. Get JA4H
+    ngx_ssl_ja4h_t ja4h;
+    ngx_memzero(&ja4h, sizeof(ngx_ssl_ja4h_t));
+    ngx_ja4h_calculate(r, &ja4h);
+    
+    last = ngx_snprintf((u_char*)ja4h_part, 128, "%s%s%c%02d_%s", 
+            ja4h.method, ja4h.version, ja4h.cookie, ja4h.header_count, ja4h.header_hash);
+    *last = '\0';
+            
+    // 2. Get JA4 (if SSL)
+    if (r->connection->ssl) {
+        SSL *ssl = r->connection->ssl->connection;
+        ngx_ja4_ssl_ctx_t *ctx = SSL_get_ex_data(ssl, ngx_ja4_ssl_ex_index);
+        
+        if (ctx && ctx->ja4_data) {
+             if ((uintptr_t)ctx->ja4_data->highest_supported_tls_client_version < 65535) {
+                ngx_ja4_calculate(r->connection, ctx->ja4_data);
+            }
+             last = ngx_snprintf((u_char*)ja4_part, 128, "%c%s%c%02d%02d_%s_%s_",
+                ctx->ja4_data->transport,
+                ctx->ja4_data->version,
+                ctx->ja4_data->has_sni,
+                (int)ctx->ja4_data->ciphers_sz,
+                (int)ctx->ja4_data->extensions_sz,
+                ctx->ja4_data->cipher_hash,
+                ctx->ja4_data->extension_hash
+            );
+            *last = '\0';
+        }
+    }
+    
+    // 3. Combine
+    // JA4one = JA4 + JA4H
+    // If no JA4, matches just JA4H (or we could prefix with delimiter)
+    
+    u_char final_buf[256];
+    last = ngx_snprintf(final_buf, 256, "%s%s", ja4_part, ja4h_part);
+    *last = '\0';
+    
+    ngx_memcpy(ja4one->fingerprint, final_buf, ngx_strlen(final_buf) + 1);
 }
 
 // ------ JA4 CALCULATION LOGIC ------
@@ -484,9 +735,12 @@ void ngx_ja4_calculate(ngx_connection_t *c, ngx_ssl_ja4_t *ja4) {
         SHA256_Final(hash, &sha256);
         
         ngx_hex_dump((u_char*)ja4->cipher_hash_truncated, hash, 6);
+        ngx_hex_dump((u_char*)ja4->cipher_hash, hash, 32); 
 
     } else {
          ngx_memcpy(ja4->cipher_hash_truncated, "000000000000", 12);
+         ngx_memset(ja4->cipher_hash, '0', 64);
+         ja4->cipher_hash[64] = '\0';
     }
     
     // 3. Extensions Hashing
@@ -517,6 +771,7 @@ void ngx_ja4_calculate(ngx_connection_t *c, ngx_ssl_ja4_t *ja4) {
         SHA256_Final(hash, &sha256);
         
         ngx_hex_dump((u_char*)ja4->extension_hash_truncated, hash, 6);
+        ngx_hex_dump((u_char*)ja4->extension_hash, hash, 32);
         
         raw_count = 0;
         for (j = 0; j < ja4->extensions_sz; j++) {
@@ -526,46 +781,9 @@ void ngx_ja4_calculate(ngx_connection_t *c, ngx_ssl_ja4_t *ja4) {
 
     } else {
         ngx_memcpy(ja4->extension_hash_truncated, "000000000000", 12);
+        ngx_memset(ja4->extension_hash, '0', 64);
+        ja4->extension_hash[64] = '\0';
     }
 }
 
-static ngx_int_t ngx_http_ja4_variable(ngx_http_request_t *r, ngx_http_variable_value_t *v, uintptr_t data) {
-    if (!r->connection || !r->connection->ssl) return NGX_OK;
-    
-    SSL *ssl = r->connection->ssl->connection;
-    ngx_ja4_ssl_ctx_t *ctx = SSL_get_ex_data(ssl, ngx_ja4_ssl_ex_index);
-    
-    if (!ctx || !ctx->ja4_data) {
-        // No data collected (callback didn't run or failed)
-        v->not_found = 1;
-        return NGX_OK;
-    }
-    
-    // Perform calculation if not done
-    // We can check if version is set '13' etc. If char* is < 100 it is still int
-    if ((uintptr_t)ctx->ja4_data->highest_supported_tls_client_version < 65535) {
-        ngx_ja4_calculate(r->connection, ctx->ja4_data);
-    }
 
-    // Format Output
-    u_char *p = ngx_pnalloc(r->pool, 64); // t13d...
-    if (p == NULL) return NGX_ERROR;
-    
-    u_char *last = ngx_snprintf(p, 64, "%c%s%c%02d%02d_%s_%s",
-        ctx->ja4_data->transport,
-        ctx->ja4_data->version,
-        ctx->ja4_data->has_sni,
-        ctx->ja4_data->ciphers_sz,
-        ctx->ja4_data->extensions_sz,
-        ctx->ja4_data->cipher_hash_truncated,
-        ctx->ja4_data->extension_hash_truncated
-    );
-    
-    v->len = last - p;
-    v->data = p;
-    v->valid = 1;
-    v->no_cacheable = 0;
-    v->not_found = 0;
-    
-    return NGX_OK;
-}

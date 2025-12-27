@@ -64,9 +64,21 @@ typedef struct ngx_ssl_ja4s_s {
 } ngx_ssl_ja4s_t;
 
 typedef struct ngx_ssl_ja4h_s {
-     // keeping placeholders
-     int dummy;
+     // JA4H: MMVVCHH_HHHHHHHHHHHH
+     char method[3];   // e.g. "GE", "PO"
+     char version[3];  // e.g. "11", "20"
+     char cookie;      // 'c' or 'n'
+     int  header_count;// e.g. 12
+     char header_hash[65]; // Full SHA256
+     
+     // Storage for raw calculation
+     char *sorted_headers; // Comma separated string of header names
 } ngx_ssl_ja4h_t;
+
+typedef struct ngx_ssl_ja4one_s {
+    // JA4one: JA4_JA4H
+    char fingerprint[512]; 
+} ngx_ssl_ja4one_t;
 
 typedef struct ngx_ssl_ja4t_s { int dummy; } ngx_ssl_ja4t_t;
 typedef struct ngx_ssl_ja4ts_s { int dummy; } ngx_ssl_ja4ts_t;
