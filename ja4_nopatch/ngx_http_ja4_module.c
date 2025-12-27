@@ -40,6 +40,14 @@ static int ngx_ja4_is_grease(const char *ext) {
     return 0;
 }
 
+static int ngx_ja4_is_grease(const char *ext) {
+    for (size_t i = 0; i < sizeof(GREASE)/sizeof(char*); i++) {
+        if (ngx_strcmp(ext, GREASE[i]) == 0) return 1;
+    }
+    return 0;
+}
+
+/* Unused in simplified version
 static int ngx_ja4_is_dynamic(const char *ext) {
     for (size_t i = 0; i < sizeof(EXT_IGNORE_DYNAMIC)/sizeof(char*); i++) {
         if (ngx_strcmp(ext, EXT_IGNORE_DYNAMIC[i]) == 0) return 1;
@@ -63,7 +71,7 @@ static int compare_hexes(const void *a, const void *b) {
     if (hex_a > hex_b) return 1;
     return 0;
 }
-
+*/
 
 // Client Hello Callback
 // This replaces the patch logic
@@ -289,7 +297,7 @@ void ngx_ja4_calculate(ngx_connection_t *c, ngx_ssl_ja4_t *ja4) {
         ja4->ciphers = ngx_pnalloc(pool, ja4->ciphers_sz * sizeof(char*));
         
         // Populate Hex Strings
-        for (int i=0; i < ja4->ciphers_sz; i++) {
+        for (size_t i=0; i < ja4->ciphers_sz; i++) {
              const SSL_CIPHER *c_obj = sk_SSL_CIPHER_value(cp, i);
              int id = SSL_CIPHER_get_protocol_id(c_obj);
              char hex[5];
