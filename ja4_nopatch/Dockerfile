@@ -1,11 +1,12 @@
-FROM alpine:3.18
+FROM alpine:3.21
 
-ARG NGINX_VERSION=1.25.0
+ARG NGINX_VERSION=1.27.3
 
 RUN apk add --no-cache \
     gcc \
     libc-dev \
     make \
+    openssl \
     openssl-dev \
     pcre-dev \
     zlib-dev \

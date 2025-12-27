@@ -84,8 +84,17 @@ typedef struct ngx_ssl_ja4l_s { int dummy; } ngx_ssl_ja4l_t;
 
 
 // Configuration structs
+// Configuration structs
+typedef struct {
+    ngx_str_t name;
+    ngx_uint_t type; // NGX_HTTP_JA4_ALLOW or NGX_HTTP_JA4_DENY
+} ngx_http_ja4_rule_t;
+
 typedef struct {
     ngx_flag_t  enable;
+    ngx_array_t *rules;      // Array of ngx_http_ja4_rule_t for JA4
+    ngx_array_t *rules_h;    // Array of ngx_http_ja4_rule_t for JA4H
+    ngx_array_t *rules_one;  // Array of ngx_http_ja4_rule_t for JA4one
 } ngx_http_ja4_srv_conf_t;
 
 #endif
