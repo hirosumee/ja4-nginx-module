@@ -1,89 +1,59 @@
-# -------- Stage 1: Common base with packages --------
-FROM alpine AS base
+FROM alpine:3.21
 
-ARG DEBIAN_FRONTEND=noninteractive
+ARG NGINX_VERSION=1.27.3
 
 RUN apk add --no-cache \
     gcc \
     libc-dev \
     make \
+    openssl \
     openssl-dev \
     pcre-dev \
     zlib-dev \
     wget \
-    patch \
     perl-dev \
-    nghttp2-dev \
-    nghttp3-dev \
     linux-headers
 
-RUN adduser -D dswebuser
+# 1. Download OpenSSL (Standard) - REMOVED, using system openssl-dev
+# RUN wget https://github.com/openssl/openssl/releases/download/openssl-${OPENSSL_VERSION}/openssl-${OPENSSL_VERSION}.tar.gz && \
+#    tar -zxf openssl-${OPENSSL_VERSION}.tar.gz
 
-# -------- Stage 2: Precompiled sources for caching --------
-FROM base AS build-cache
-
-ARG NGINX_VERSION=1.25.0
-ARG OPENSSL_VERSION=3.2.1
-
+# 2. Download Nginx (Standard)
 WORKDIR /tmp
-
-# Download and extract
-# Nginx source code
-RUN wget https://nginx.org/download/nginx-${NGINX_VERSION}.tar.gz && \
+RUN echo "Downloading Nginx..." && \
+    wget https://nginx.org/download/nginx-${NGINX_VERSION}.tar.gz && \
     tar -zxf nginx-${NGINX_VERSION}.tar.gz
-# OpenSSL source code
-RUN wget https://github.com/openssl/openssl/releases/download/openssl-${OPENSSL_VERSION}/openssl-${OPENSSL_VERSION}.tar.gz && \
-    tar -zxf openssl-${OPENSSL_VERSION}.tar.gz
 
-COPY src/config /tmp/ja4-nginx-module/src/config
-COPY src/ngx_http_ssl_ja4_module.c.dummy /tmp/ja4-nginx-module/src/ngx_http_ssl_ja4_module.c
+# 3. Copy our No-Patch Module
+COPY . /tmp/ja4_nopatch
 
+# 4. Build Nginx with our module
 WORKDIR /tmp/nginx-${NGINX_VERSION}
-RUN ./configure \
-      --with-cc-opt=-Wno-error=unterminated-string-initialization \
-      --with-openssl=/tmp/openssl-${OPENSSL_VERSION} \
-      --with-debug --with-compat \
-      --add-module=/tmp/ja4-nginx-module/src \
-      --with-http_ssl_module \
-      --with-http_v2_module \
-      --with-http_v3_module \
-      --prefix=/etc/nginx && \
-    make -j$(nproc)
 
-# -------- Stage 3: Final build with actual module and patches --------
-FROM base AS final
+# Note: We point --add-module to our copied directory
+# We use system OpenSSL (from openssl-dev)
+    RUN ./configure \
+    --with-compat \
+    --add-module=/tmp/ja4_nopatch \
+    --with-http_ssl_module \
+    --prefix=/etc/nginx \
+    --with-cc-opt="-Wno-error -O0" \
+    && (make > /tmp/build.log 2>&1 || (tail -n 100 /tmp/build.log && exit 1)) \
+    && make install
 
-ARG NGINX_VERSION=1.25.0
-ARG OPENSSL_VERSION=3.2.1
+# Generate self-signed certificate
+RUN openssl req -x509 -newkey rsa:4096 -keyout /etc/nginx/key.pem -out /etc/nginx/cert.pem -days 365 -nodes -subj '/CN=localhost'
 
-WORKDIR /tmp
-
-# Copy sources from build cache
-COPY --from=build-cache /tmp/nginx-${NGINX_VERSION} /tmp/nginx-${NGINX_VERSION}
-COPY --from=build-cache /tmp/openssl-${OPENSSL_VERSION} /tmp/openssl-${OPENSSL_VERSION}
-
-# Rebuild only what's changed in the OpenSSL
-WORKDIR /tmp/openssl-${OPENSSL_VERSION}
-RUN make -j$(nproc) && \
-    make install_sw LIBDIR=lib
-
-# Patch nginx
-COPY . /tmp/ja4-nginx-module
-WORKDIR /tmp/nginx-${NGINX_VERSION}
-RUN patch -p1 < /tmp/ja4-nginx-module/patches/nginx.patch
-
-# Rebuild only what's changed in the nginx patch or module
-RUN rm -f objs/addon/src/ngx_http_ssl_ja4_module.o && \
-    make -j$(nproc) && \
-    make install
-
-# Link logs
-RUN ln -sf /dev/stdout /etc/nginx/logs/access.log && \
-    ln -sf /dev/stderr /etc/nginx/logs/error.log
-
-# Clean up
+# Cleanup
 WORKDIR /
 RUN rm -rf /tmp/*
 
-# Run Nginx in the foreground
+
+# Logs
+RUN ln -sf /dev/stdout /etc/nginx/logs/access.log && \
+    ln -sf /dev/stderr /etc/nginx/logs/error.log
+
+# Verify module loading
+RUN /etc/nginx/sbin/nginx -V
+
 CMD ["/etc/nginx/sbin/nginx", "-g", "daemon off;"]

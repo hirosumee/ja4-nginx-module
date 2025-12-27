@@ -1,16 +1,12 @@
+
+
 services:
-  ja4-nginx:
-    container_name: ja4-nginx
+  nginx-ja4-nopatch:
     build:
       context: .
-      target: final
-    image: ja4-nginx:latest
+      dockerfile: Dockerfile
     ports:
-      - "80:80"
-      - "443:443"
-    restart: always
+      - "8443:443"
+      - "8080:8080"
     volumes:
-      - ./nginx_utils/nginx.conf:/etc/nginx/conf/nginx.conf
-      - ./nginx_utils/server.crt:/etc/nginx/conf/server.crt
-      - ./nginx_utils/server.key:/etc/nginx/conf/server.key
-      - ./nginx_utils/logs:/etc/nginx/logs
+      - ./nginx.conf:/etc/nginx/conf/nginx.conf
