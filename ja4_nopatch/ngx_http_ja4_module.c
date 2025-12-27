@@ -23,6 +23,7 @@ static const char *GREASE[] = {
     "8a8a", "9a9a", "aaaa", "baba", "caca", "dada", "eaea", "fafa",
 };
 
+/* Unused in simplified version
 static const char *EXT_IGNORE_DYNAMIC[] = {
     "0029", // PRE_SHARED_KEY
     "0015", // PADDING
@@ -32,13 +33,7 @@ static const char *EXT_IGNORE[] = {
     "0010", // ALPN
     "0000", // SNI
 };
-
-static int ngx_ja4_is_grease(const char *ext) {
-    for (size_t i = 0; i < sizeof(GREASE)/sizeof(char*); i++) {
-        if (ngx_strcmp(ext, GREASE[i]) == 0) return 1;
-    }
-    return 0;
-}
+*/
 
 static int ngx_ja4_is_grease(const char *ext) {
     for (size_t i = 0; i < sizeof(GREASE)/sizeof(char*); i++) {
