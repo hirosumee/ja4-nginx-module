@@ -1,5 +1,7 @@
 FROM alpine:3.18
 
+ARG NGINX_VERSION=1.25.0
+
 # 1. Download OpenSSL (Standard) - REMOVED, using system openssl-dev
 # RUN wget https://github.com/openssl/openssl/releases/download/openssl-${OPENSSL_VERSION}/openssl-${OPENSSL_VERSION}.tar.gz && \
 #    tar -zxf openssl-${OPENSSL_VERSION}.tar.gz
