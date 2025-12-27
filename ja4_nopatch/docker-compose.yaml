@@ -1,0 +1,11 @@
+version: '3'
+
+services:
+  nginx-ja4-nopatch:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "8443:443"
+    volumes:
+      - ./nginx.conf:/etc/nginx/conf/nginx.conf
