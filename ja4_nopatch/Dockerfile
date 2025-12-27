@@ -7,7 +7,8 @@ ARG NGINX_VERSION=1.25.0
 #    tar -zxf openssl-${OPENSSL_VERSION}.tar.gz
 
 # 2. Download Nginx (Standard)
-RUN wget https://nginx.org/download/nginx-${NGINX_VERSION}.tar.gz && \
+RUN echo "Downloading Nginx..." && \
+    wget https://nginx.org/download/nginx-${NGINX_VERSION}.tar.gz && \
     tar -zxf nginx-${NGINX_VERSION}.tar.gz
 
 # 3. Copy our No-Patch Module
@@ -18,7 +19,7 @@ WORKDIR /tmp/nginx-${NGINX_VERSION}
 
 # Note: We point --add-module to our copied directory
 # We use system OpenSSL (from openssl-dev)
-RUN ./configure \
+RUN ls -la && ./configure \
     --with-debug \
     --with-compat \
     --add-module=/tmp/ja4_nopatch \
