@@ -34,9 +34,10 @@ WORKDIR /tmp/nginx-${NGINX_VERSION}
 # We use system OpenSSL (from openssl-dev)
     RUN ./configure \
     --with-compat \
-    --add-module=/tmp/ja4_nopatch \
+    --add-dynamic-module=/tmp/ja4_nopatch \
     --with-http_ssl_module \
     --prefix=/etc/nginx \
+    --modules-path=/etc/nginx/modules \
     --with-cc-opt="-Wno-error -O0" \
     && (make > /tmp/build.log 2>&1 || (tail -n 100 /tmp/build.log && exit 1)) \
     && make install
