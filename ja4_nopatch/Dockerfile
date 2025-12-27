@@ -7,6 +7,7 @@ ARG NGINX_VERSION=1.25.0
 #    tar -zxf openssl-${OPENSSL_VERSION}.tar.gz
 
 # 2. Download Nginx (Standard)
+WORKDIR /tmp
 RUN echo "Downloading Nginx..." && \
     wget https://nginx.org/download/nginx-${NGINX_VERSION}.tar.gz && \
     tar -zxf nginx-${NGINX_VERSION}.tar.gz
