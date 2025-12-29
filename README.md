@@ -1,7 +1,7 @@
 # JA4 Nginx Module
 
 ## Overview
-This Nginx module implements **JA4**, **JA4H**, and **JA4one** fingerprinting standards for HTTP and TLS clients. It enables you to identify and fingerprint incoming requests based on their TLS handshake (Client Hello) and HTTP headers.
+This Nginx module implements **JA4**, **JA4H**, **JA4TCP**, and **JA4one** fingerprinting standards for HTTP and TLS clients. It enables you to identify and fingerprint incoming requests based on their TLS handshake (Client Hello), HTTP headers, and TCP characteristics.
 
 <img width="1546" height="406" alt="image" src="https://github.com/user-attachments/assets/1dcb5a00-e2cc-4e5e-be38-dd62ac0cf11f" />
 
@@ -19,6 +19,7 @@ This module is designed for:
 ## Features
 - **JA4 (TLS)**: Fingerprints the TLS Client Hello (Version, Cipher Suites, Extensions, etc.).
 - **JA4H (HTTP)**: Fingerprints HTTP headers (Method, Version, Cookie, Header Order).
+- **JA4TCP (TCP)**: Fingerprints TCP characteristics (Window Size, Options, Flags, TTL).
 - **JA4one (Composite)**: A combined fingerprint (`JA4_JA4H`) providing a holistic view of the client (TLS + HTTP).
 - **Access Control Directives:** Native Nginx directives to block/allow traffic.
 - **Variables:** Exposes fingerprints as Nginx variables for logging or Lua scripting.
@@ -44,6 +45,7 @@ make install
 The module exposes the following variables:
 - `$http_ssl_ja4`: The TLS fingerprint.
 - `$http_ssl_ja4h`: The HTTP fingerprint.
+- `$http_ssl_ja4tcp`: The TCP fingerprint.
 - `$http_ssl_ja4one`: The composite fingerprint.
 
 Add them to your `log_format`:
@@ -51,7 +53,8 @@ Add them to your `log_format`:
 ```nginx
 http {
     log_format ja4_log '$remote_addr - [$time_local] "$request" '
-                       'JA4="$http_ssl_ja4" JA4H="$http_ssl_ja4h" JA4one="$http_ssl_ja4one"';
+                       'JA4="$http_ssl_ja4" JA4H="$http_ssl_ja4h" '
+                       'JA4TCP="$http_ssl_ja4tcp" JA4one="$http_ssl_ja4one"';
 
     access_log logs/ja4.log ja4_log;
 }
@@ -63,6 +66,7 @@ You can enforce rules in your `server` or `location` blocks.
 **Directives:**
 - `ja4_deny` / `ja4_allow`: Check against JA4 (TLS) fingerprint.
 - `ja4h_deny` / `ja4h_allow`: Check against JA4H (HTTP) fingerprint.
+- `ja4tcp_deny` / `ja4tcp_allow`: Check against JA4TCP (TCP) fingerprint.
 - `ja4one_deny` / `ja4one_allow`: Check against JA4one composite fingerprint.
 
 **Example:**
@@ -76,6 +80,9 @@ server {
 
     # Block a specific curl client via JA4H
     ja4h_deny "ge11n03_fe444ad14866d725a8e22320d4ed56810819b0fae0efae0c09bedfdd";
+    
+    # Block suspicious TCP fingerprints
+    ja4tcp_deny "65535_5840_1_64_m";
 
     location / {
         # Allow specific bot via JA4one
@@ -83,6 +90,8 @@ server {
         
         # Add headers for debugging
         add_header X-JA4-Fingerprint $http_ssl_ja4;
+        add_header X-JA4H-Fingerprint $http_ssl_ja4h;
+        add_header X-JA4TCP-Fingerprint $http_ssl_ja4tcp;
         add_header X-JA4one-Fingerprint $http_ssl_ja4one;
     }
 }
@@ -97,10 +106,196 @@ Due to the full hash modification, the formats are:
     - `11`: HTTP 1.1
     - `n`: No Cookie
     - `03`: 3 Headers
+- **JA4TCP**: `<window_size>_<options_length>_<flags>_<ttl>_<mode>`
+    - Example: `65535_5840_1_64_m`
+    - `window_size`: TCP window size
+    - `options_length`: Length of TCP options
+    - `flags`: TCP flags (1 = SYN)
+    - `ttl`: Time to Live
+    - `mode`: m (modern) or l (legacy)
 - **JA4one**: `[JA4]_[JA4H]` (Concatenated)
+
+## Usage Examples
+
+### Example 1: Bot Detection and Blocking
+Identify and block common bot fingerprints:
+
+```nginx
+server {
+    listen 443 ssl;
+    server_name example.com;
+    
+    # Block known bot JA4 fingerprints
+    ja4_deny "t13d1517h2_8daaf6152771...";
+    ja4_deny "t12d2917h2_7af8b3c9...";
+    
+    # Block bot HTTP patterns
+    ja4h_deny "ge11n00_3b5f7...";
+    
+    location / {
+        return 200 "OK";
+    }
+}
+```
+
+### Example 2: Allow Only Legitimate Browsers
+Create a whitelist of known good browsers:
+
+```nginx
+server {
+    listen 443 ssl;
+    server_name secure-api.example.com;
+    
+    # Allow Chrome
+    ja4_allow "t13d3016h2_8daaf6152771...";
+    # Allow Firefox
+    ja4_allow "t13d2217h2_a6bf3e8f...";
+    # Allow Safari
+    ja4_allow "t13d1516h2_9fe2a8c3...";
+    
+    # Deny all other fingerprints
+    ja4_deny "all";
+    
+    location /api/ {
+        proxy_pass http://backend;
+    }
+}
+```
+
+### Example 3: Multi-Layer Fingerprinting
+Combine TLS, HTTP, and TCP fingerprinting for maximum security:
+
+```nginx
+server {
+    listen 443 ssl;
+    server_name api.example.com;
+    
+    # Block suspicious TCP patterns (typical of bots/scanners)
+    ja4tcp_deny "1024_1460_2_128_l";
+    ja4tcp_deny "8192_1460_2_64_l";
+    
+    # Block known malicious JA4H patterns
+    ja4h_deny "po11n00_8b3f...";
+    
+    location /sensitive/ {
+        # Additional validation using JA4one
+        ja4one_deny "t13d1515h2_..._ge10n00_...";
+        
+        # Add all fingerprints to response headers for monitoring
+        add_header X-JA4 $http_ssl_ja4 always;
+        add_header X-JA4H $http_ssl_ja4h always;
+        add_header X-JA4TCP $http_ssl_ja4tcp always;
+        add_header X-JA4one $http_ssl_ja4one always;
+        
+        proxy_pass http://sensitive-backend;
+    }
+}
+```
+
+### Example 4: Analytics and Monitoring
+Log all fingerprints for traffic analysis:
+
+```nginx
+http {
+    # Define comprehensive logging format
+    log_format fingerprint_analytics '$remote_addr - $remote_user [$time_local] '
+                                     '"$request" $status $body_bytes_sent '
+                                     '"$http_referer" "$http_user_agent" '
+                                     'JA4="$http_ssl_ja4" '
+                                     'JA4H="$http_ssl_ja4h" '
+                                     'JA4TCP="$http_ssl_ja4tcp" '
+                                     'JA4one="$http_ssl_ja4one"';
+    
+    server {
+        listen 443 ssl;
+        server_name analytics.example.com;
+        
+        # Log to special file
+        access_log /var/log/nginx/fingerprints.log fingerprint_analytics;
+        
+        location / {
+            return 200 "Logged";
+        }
+    }
+}
+```
+
+### Example 5: Rate Limiting by Fingerprint
+Use fingerprints with Lua/OpenResty for advanced rate limiting:
+
+```nginx
+http {
+    lua_shared_dict fingerprint_limit 10m;
+    
+    server {
+        listen 443 ssl;
+        
+        location /api/ {
+            access_by_lua_block {
+                local limit = require "resty.limit.req"
+                local fingerprint = ngx.var.http_ssl_ja4one or "unknown"
+                
+                -- Different limits based on fingerprint
+                local lim, err = limit.new("fingerprint_limit", 10, 5)
+                if not lim then
+                    ngx.log(ngx.ERR, "failed to instantiate limit.req: ", err)
+                    return ngx.exit(500)
+                end
+                
+                local key = fingerprint
+                local delay, err = lim:incoming(key, true)
+                if not delay then
+                    if err == "rejected" then
+                        return ngx.exit(429)
+                    end
+                    return ngx.exit(500)
+                end
+            }
+            
+            proxy_pass http://backend;
+        }
+    }
+}
+```
+
+### Example 6: Conditional Access Based on Fingerprint Type
+Different behaviors for different client types:
+
+```nginx
+map $http_ssl_ja4tcp $client_type {
+    default "unknown";
+    "~^65535_" "modern_client";
+    "~^1024_" "legacy_client";
+    "~^8192_" "suspicious";
+}
+
+server {
+    listen 443 ssl;
+    
+    location / {
+        # Redirect suspicious clients to captcha
+        if ($client_type = "suspicious") {
+            return 302 /captcha;
+        }
+        
+        # Limit features for legacy clients
+        if ($client_type = "legacy_client") {
+            return 301 /legacy-version;
+        }
+        
+        # Full access for modern clients
+        proxy_pass http://backend;
+    }
+    
+    location /captcha {
+        return 200 "Please verify you are human";
+    }
+}
+```
 
 ## Troubleshooting
 - **Missing JA4?** Ensure you are connecting via **HTTPS**. Plain HTTP requests have no TLS handshake, so `$http_ssl_ja4` will be empty.
+- **Missing JA4TCP?** JA4TCP requires access to raw TCP connection data. Ensure NGINX is running with `--with-http_realip_module` and proper network configuration. If using Docker, use `--network host` mode for accurate TCP fingerprinting.
 - **Short Codes?** If you see 12-char hashes, you are running the standard version. Recompile with the modified generic hash length if full hashes are required.
 
 ## License
