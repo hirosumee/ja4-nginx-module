@@ -15,6 +15,21 @@ This document provides a comprehensive technical analysis of the `ja4-nginx-modu
 4. **Algorithms**: Complete breakdown of JA4TCP, JA4, JA4H, and JA4ONE calculation methods
 5. **Practical Examples**: Step-by-step walkthrough with real hex values and packet captures
 
+> [!NOTE]
+> **Important Research Disclaimer**: This white paper documents technical implementation details of the JA4 Nginx Module for **research and educational purposes**. All information provided—including OS TCP signatures, fingerprint examples, and technical specifications—represents a snapshot in time and may become outdated as:
+> - Operating systems release updates that modify TCP/IP stack behavior
+> - Browsers and applications change their TLS/HTTP implementation
+> - Network protocol standards evolve (e.g., TLS 1.4, HTTP/3 adoption)
+> - Fingerprinting databases (p0f, Nmap) receive updates
+> 
+> **Users are strongly advised to**:
+> 1. **Verify current behavior** by capturing actual network traffic from target platforms
+> 2. **Test fingerprints** in your specific environment before production deployment
+> 3. **Monitor OS/browser updates** that may change TCP/TLS characteristics
+> 4. **Cross-reference** with up-to-date official documentation from OS vendors
+> 
+> While every effort has been made to ensure accuracy at the time of writing (December 2024), network fingerprinting is a moving target. Use this document as a foundation for understanding, not as absolute truth.
+
 ---
 
 ## 2. Why Fingerprinting is Possible: Technical Foundation
