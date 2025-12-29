@@ -10,9 +10,9 @@ This document provides a comprehensive technical analysis of the `ja4-nginx-modu
 
 **What You'll Learn**:
 1. **Network Fundamentals**: OSI Model, TCP connections, and TLS handshakes explained from the ground up
-2. **Intervention Points**: Exactly where and how this module intercepts connection data
-3. **Algorithms**: Complete breakdown of JA4, JA4H, and JA4ONE calculation methods
-4. **Practical Examples**: Step-by-step walkthrough with real hex values
+2. **Intervention Points**: Exactly where and how this module intercepts connection data at Layers 4, 6, and 7
+3. **Algorithms**: Complete breakdown of JA4TCP, JA4, JA4H, and JA4ONE calculation methods
+4. **Practical Examples**: Step-by-step walkthrough with real hex values and packet captures
 
 ---
 
@@ -29,12 +29,12 @@ The **OSI (Open Systems Interconnection) Model** is a 7-layer framework describi
 | **7** | Application | User-facing protocols | HTTP, DNS, SSH | ✅ Analyzes HTTP headers (JA4H) |
 | **6** | Presentation | Data formatting, encryption | SSL/TLS, JPEG, ASCII | ✅ **CRITICAL: Intercepts TLS handshake** |
 | **5** | Session | Connection management | NetBIOS, RPC | ✅ Where TLS session is established |
-| **4** | Transport | End-to-end delivery | TCP, UDP | ✅ Detects TCP vs QUIC |
+| **4** | Transport | End-to-end delivery | TCP, UDP | ✅ **NEW: Captures TCP SYN packet (JA4TCP)** |
 | **3** | Network | Routing between networks | IP, ICMP | ❌ Not used |
 | **2** | Data Link | Node-to-node transfer | Ethernet, MAC | ❌ Not used |
 | **1** | Physical | Hardware transmission | Cables, radio waves | ❌ Not used |
 
-**Key Insight**: The JA4 module primarily operates at **Layers 4-7**, capturing data during the TLS handshake (Layer 6) and analyzing HTTP headers (Layer 7).
+**Key Insight**: The JA4 module now operates at **Layers 4-7**, capturing TCP SYN data (Layer 4), TLS handshake data (Layer 6), and HTTP headers (Layer 7) for comprehensive client fingerprinting.
 
 ### 2.2 TCP Connection Establishment
 
@@ -719,6 +719,331 @@ JA4ONE: t13d0709_e27c1ff97fe7_a1b2c3d4e5f6_ge11c08_b3a8c5d2e1f4a7b9c3d5e7f1a3b5c
 
 ---
 
+## 5.5 JA4TCP (TCP Fingerprint) - **NEW**
+
+### 5.5.1 What is JA4TCP?
+
+**JA4TCP** is a **Layer 4 (Transport Layer)** fingerprinting technique that analyzes the TCP SYN packet to identify client characteristics at the network stack level. While JA4 focuses on TLS (Layer 6) and JA4H on HTTP (Layer 7), JA4TCP operates at the TCP layer, making it the **earliest detection point** in the connection lifecycle.
+
+**Why JA4TCP Matters**:
+- **OS Detection**: Different operating systems have distinct TCP stack implementations
+- **Bot Detection**: Many bots use simplified TCP stacks that differ from real browsers
+- **NAT/Proxy Detection**: Can identify if traffic is being proxied or NAT'd
+- **Pre-TLS Fingerprinting**: Works even for non-HTTPS traffic (HTTP, FTP, etc.)
+
+### 5.5.2 TCP SYN Packet Structure
+
+The TCP SYN packet is the **first packet** sent during the TCP 3-way handshake. It contains critical fingerprinting data in its options field.
+
+#### Complete TCP Header Structure
+
+```
+ 0                   1                   2                   3
+ 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1
++-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+|          Source Port          |       Destination Port        |
++-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+|                        Sequence Number                        |
++-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+|                    Acknowledgment Number                      |
++-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+| Offset| Res |     Flags     |            Window             |
++-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+|           Checksum            |         Urgent Pointer        |
++-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+|                    Options (variable)                         |
++-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+```
+
+**Key Fields for JA4TCP**:
+- **Window Size** (16 bits): Initial receive window size
+- **Data Offset** (4 bits): TCP header length (includes options)
+- **Options** (variable): TCP options in Type-Length-Value format
+
+### 5.5.3 TCP Options Deep Dive
+
+TCP Options follow a **Type-Length-Value (TLV)** encoding scheme.
+
+#### Common TCP Options
+
+| Kind (Hex) | Name | Length | Purpose | JA4TCP Usage |
+|------------|------|--------|---------|--------------|
+| `00` | End of Option List (EOL) | 1 byte | Marks end of options | Ignored (marks end) |
+| `01` | No-Operation (NOP) | 1 byte | Padding for alignment | Skipped (not recorded) |
+| `02` | Maximum Segment Size (MSS) | 4 bytes | Max data per segment | **Extracted as value** |
+| `03` | Window Scale | 3 bytes | Window size multiplier | **Extracted as value** |
+| `04` | SACK Permitted | 2 bytes | Selective ACK support | **Recorded as kind** |
+| `08` | Timestamps | 10 bytes | Round-trip time measurement | **Recorded as kind** |
+| `1e` | TCP Fast Open | Variable | Reduces handshake latency | **Recorded as kind** |
+
+#### Example: TCP Options Byte Sequence
+
+```
+Raw Hex: 02 04 05 b4 04 02 08 0a 12 34 56 78 00 00 00 00 01 03 03 07
+```
+
+**Parsing**:
+```
+02 04 05 b4       → Kind 02 (MSS), Length 4, Value 0x05b4 (1460 bytes)
+04 02             → Kind 04 (SACK Permitted), Length 2
+08 0a ...         → Kind 08 (Timestamps), Length 10, Timestamp data
+01                → Kind 01 (NOP) - padding
+03 03 07          → Kind 03 (Window Scale), Length 3, Scale factor 7
+```
+
+**JA4TCP Extraction**:
+- **Option Kinds**: `2`, `4`, `8`, `3` (in order, **NOPs included if present**)
+- **MSS**: `1460`
+- **Window Scale**: `7`
+
+### 5.5.4 JA4TCP Fingerprint Format
+
+**Structure**: `w_o_m_s`
+
+| Component | Description | Example |
+|-----------|-------------|---------|
+| `w` | Window Size (decimal) | `65535` |
+| `o` | TCP Option Kinds (**decimal**, dash-separated, **NOPs included**) | `2-1-3-1-1-4` |
+| `m` | Maximum Segment Size (decimal) | `1460` |
+| `s` | Window Scale Factor (decimal) | `7` |
+
+**Complete Example**: `65535_2-1-3-1-1-4_1460_7`
+
+### 5.5.5 How NGINX Captures TCP SYN Data
+
+The module uses Linux's `TCP_SAVE_SYN` socket option to access the raw SYN packet.
+
+#### Kernel Feature: TCP_SAVE_SYN
+
+**What It Does**: Instructs the Linux kernel to save a copy of the initial SYN packet for each accepted connection.
+
+**API Usage**:
+```c
+// Enable on listening socket (during module init)
+int optval = 1;
+setsockopt(listen_fd, IPPROTO_TCP, TCP_SAVE_SYN, &optval, sizeof(optval));
+
+// Retrieve saved SYN (after accept)
+unsigned char syn_buf[1024];
+socklen_t len = sizeof(syn_buf);
+getsockopt(conn_fd, IPPROTO_TCP, TCP_SAVED_SYN, syn_buf, &len);
+```
+
+**Data Returned**: Complete IP + TCP headers of the original SYN packet.
+
+#### Module Integration Flow
+
+```mermaid
+sequenceDiagram
+    participant Client
+    participant Kernel as Linux Kernel
+    participant NGINX as NGINX Process
+    participant Module as JA4TCP Module
+    
+    Note over NGINX,Module: Module Init Phase
+    Module->>Kernel: setsockopt(TCP_SAVE_SYN, 1)
+    Note over Kernel: Kernel will save SYN packets
+    
+    Note over Client,Kernel: TCP Handshake
+    Client->>Kernel: ① SYN Packet
+    Note over Kernel: 💾 Kernel saves copy of SYN
+    Kernel->>Client: ② SYN-ACK
+    Client->>Kernel: ③ ACK
+    
+    Note over Kernel,NGINX: Connection Established
+    Kernel->>NGINX: accept() returns new socket
+    
+    Note over Client,NGINX: HTTP Request Phase
+    Client->>NGINX: HTTP Request (GET /)
+    NGINX->>Module: ngx_http_ja4_access_handler()
+    Module->>Kernel: getsockopt(TCP_SAVED_SYN)
+    Kernel-->>Module: Return saved SYN (IP+TCP headers)
+    Module->>Module: Parse IP header (skip to TCP)
+    Module->>Module: Parse TCP header (extract window, offset)
+    Module->>Module: Parse TCP options (extract kinds, MSS, scale)
+    Module->>Module: Format fingerprint (w_o_m_s)
+    Module-->>NGINX: Return $http_ssl_ja4tcp variable
+    NGINX->>Client: HTTP Response + X-JA4TCP-Fingerprint header
+```
+
+### 5.5.6 Complete Calculation Walkthrough
+
+Let's fingerprint a **Chrome 120 on Linux** connection.
+
+#### Step 1: Capture Raw SYN Packet (from Kernel)
+
+**Raw Data** (IP + TCP headers):
+```
+IPv4 Header (20 bytes):
+45 00 00 3c 00 01 40 00 40 06 00 00 7f 00 00 01 7f 00 00 01
+
+TCP Header + Options (36 bytes):
+c3 8e 1f 90 12 34 56 78 00 00 00 00 a0 02 ff ff 7e 32 00 00
+02 04 ff d7 04 02 08 0a 00 00 00 00 00 00 00 00 01 03 03 07
+```
+
+#### Step 2: Parse IP Header
+
+```c
+ip_ver = (buf[0] >> 4) = 4          // IPv4
+ip_hdr_len = (buf[0] & 0x0F) * 4 = 20 bytes
+```
+
+**Skip to TCP**: Start at byte 20.
+
+#### Step 3: Parse TCP Header
+
+```c
+tcp_hdr = buf + 20
+
+// Bytes 0-1: Source Port
+// Bytes 2-3: Dest Port
+// ...
+// Bytes 14-15: Window
+window = (tcp_hdr[14] << 8) | tcp_hdr[15]
+       = (0xff << 8) | 0xff
+       = 65535
+
+// Byte 12: Data Offset
+tcp_hdr_len = ((tcp_hdr[12] >> 4) & 0x0F) * 4
+            = ((0xa0 >> 4) & 0x0F) * 4
+            = (0x0a) * 4
+            = 40 bytes
+```
+
+**Options Length**: `40 - 20 = 20 bytes`
+
+#### Step 4: Parse TCP Options
+
+**Options Raw** (20 bytes):
+```
+02 04 ff d7 04 02 08 0a 00 00 00 00 00 00 00 00 01 03 03 07
+```
+
+**Option-by-Option**:
+```
+Offset 0: Kind 02, Length 4
+  → MSS option
+  → Value: 0xffd7 = 65495 (loopback MTU - 40)
+  → opt_kinds[0] = 0x02
+  → mss = 65495
+
+Offset 4: Kind 04, Length 2
+  → SACK Permitted
+  → opt_kinds[1] = 0x04
+
+Offset 6: Kind 08, Length 10
+  → Timestamps
+  → opt_kinds[2] = 0x08
+  → (skip timestamp values)
+
+Offset 16: Kind 01 (NOP)
+  → Padding, skip
+
+Offset 17: Kind 03, Length 3
+  → Window Scale
+  → Value: 0x07 = 7
+  → opt_kinds[3] = 0x03
+  → scale = 7
+```
+
+**Extracted Data**:
+- `opt_kinds[] = {2, 4, 8, 3}`
+- `opt_count = 4`
+- `mss = 65495`
+- `scale = 7`
+
+#### Step 5: Format Fingerprint
+
+```c
+// Using ngx_snprintf with decimal-dash format
+last = ngx_snprintf(out_buf, 256, "%d_", window);
+→ "65535_"
+
+// Options as decimal-dash (including NOPs if present)
+for (i = 0; i < opt_count; i++) {
+    if (i > 0) last = ngx_snprintf(last, ..., "-");
+    last = ngx_snprintf(last, ..., "%d", (int)opt_kinds[i]);
+}
+→ "65535_2-4-8-3"
+
+last = ngx_snprintf(last, ..., "_%d_%d", mss, scale);
+→ "65535_2-4-8-3_65495_7"
+```
+
+**Final Fingerprint**: `65535_2-4-8-3_65495_7`
+
+### 5.5.7 OS & Browser Signatures
+
+Different platforms produce distinct fingerprints:
+
+| Client | Fingerprint | Notes |
+|--------|-------------|-------|
+| **Chrome/Linux** | `65535_2-4-8-3_1460_7` | Standard Ethernet MTU (1500) |
+| **Chrome/Windows** | `8192_2-4-5-1-3-3-8-1_1460_8` | Different window, scale, option order |
+| **curl (Linux)** | `65495_2-4-8-3_65495_7` | Often uses loopback MTU |
+| **Python requests** | `29200_2-4-5-4-2-8-10_1460_7` | Smaller default window |
+| **iOS Safari** | `65535_2-4-8-3_1440_4` | Slightly smaller MSS |
+
+### 5.5.8 Integration with JA4 Suite
+
+JA4TCP complements existing fingerprints:
+
+```mermaid
+graph TD
+    A[Client Connection] -->|Layer 4 TCP| B[JA4TCP]
+    A -->|Layer 6 TLS| C[JA4]
+    A -->|Layer 7 HTTP| D[JA4H]
+    
+    B --> E[Complete Profile]
+    C --> E
+    D --> E
+    
+    E -->|Combined| F[JA4ONE]
+    
+    style B fill:#e1f5ff
+    style C fill:#fff4e1
+    style D fill:#f0ffe1
+    style F fill:#ffe1f5
+```
+
+**Example Multi-Layer Detection**:
+```
+Client Claims: Chrome 120 / Windows 11
+JA4TCP: 8192_2-4-5-1-3-3-8-1_1460_8  ✅ Matches Windows
+JA4:    t13d1012_...                 ✅ Matches Chrome 120
+JA4H:   ge11c08_...                  ✅ Matches Chrome Headers
+
+→ VERDICT: Legitimate Chrome on Windows
+```
+
+**Bot Detection**:
+```
+Client Claims: Chrome 120 / Windows 11
+JA4TCP: 29200_2-4-8-3_1460_7         ❌ Python-like
+JA4:    t12i0508_...                 ❌ Curl-like
+JA4H:   ge11n03_...                  ⚠️  No cookies (suspicious)
+
+→ VERDICT: Bot spoofing User-Agent
+```
+
+### 5.5.9 Limitations & Considerations
+
+**Docker Networking**:
+- **Bridge Mode**: Module sees Docker Proxy's fingerprint (all clients identical)
+- **Host Mode**: Module sees actual client fingerprint ✅ **Required**
+
+**NAT/Load Balancers**:
+- If client traffic passes through a TCP proxy that terminates connections, the fingerprint will be that of the proxy, not the client
+- Use X-Forwarded-For headers or direct routing when possible
+
+**Loopback Testing**:
+- Loopback interface (127.0.0.1) uses MTU 65536, resulting in MSS ~65495
+- Production fingerprints will show standard Ethernet MSS (1460) or jumbo frames (8960)
+
+---
+
+
 ## 6. Use Cases & Security Benefits
 
 ### Bot Detection
@@ -742,12 +1067,15 @@ JA4ONE: t13d0709_e27c1ff97fe7_a1b2c3d4e5f6_ge11c08_b3a8c5d2e1f4a7b9c3d5e7f1a3b5c
 
 ---
 
+
 ## 7. Conclusion
 
-The `ja4-nginx-module` provides a powerful, low-level fingerprinting mechanism that operates at the protocol level, making it resilient to spoofing attempts. By understanding the OSI model, TCP/TLS handshakes, and the precise intervention points, you can effectively deploy this module to enhance your application's security posture.
+The `ja4-nginx-module` provides a powerful, multi-layer fingerprinting mechanism that operates across the network stack, making it highly resilient to spoofing attempts. By understanding the OSI model, TCP/TLS handshakes, and the precise intervention points, you can effectively deploy this module to enhance your application's security posture.
 
 **Key Takeaways**:
-1. **Layer 6 Intervention**: JA4 captures data during the TLS ClientHello (before encryption negotiation completes)
-2. **Layer 7 Enforcement**: Rules are enforced during the HTTP Access Phase (after headers are parsed)
-3. **Resilient Fingerprinting**: Sorting, filtering GREASE, and hashing create stable, spoofing-resistant signatures
-4. **Combined Identity**: JA4ONE binds TLS and HTTP fingerprints for multi-layer verification
+1. **Layer 4 Intervention**: JA4TCP captures data from the TCP SYN packet (earliest detection point)
+2. **Layer 6 Intervention**: JA4 captures data during the TLS ClientHello (before encryption negotiation completes)
+3. **Layer 7 Analysis**: JA4H analyzes HTTP headers for application-layer fingerprinting
+4. **Layer 7 Enforcement**: Rules are enforced during the HTTP Access Phase (after headers are parsed)
+5. **Resilient Fingerprinting**: Sorting, filtering GREASE/NOPs, and hashing create stable, spoofing-resistant signatures
+6. **Multi-Layer Identity**: JA4ONE combines TCP, TLS, and HTTP fingerprints for comprehensive client profiling

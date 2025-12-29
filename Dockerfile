@@ -39,7 +39,7 @@ WORKDIR /tmp/nginx-${NGINX_VERSION}
     --prefix=/etc/nginx \
     --modules-path=/etc/nginx/modules \
     --with-cc-opt="-Wno-error -O0" \
-    && (make > /tmp/build.log 2>&1 || (tail -n 100 /tmp/build.log && exit 1)) \
+    && make \
     && make install
 
 # Generate self-signed certificate

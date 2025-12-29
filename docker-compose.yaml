@@ -5,8 +5,6 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-    ports:
-      - "8443:443"
-      - "8080:8080"
+    network_mode: "host"
     volumes:
       - ./nginx.conf:/etc/nginx/conf/nginx.conf

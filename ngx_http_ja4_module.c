@@ -14,6 +14,14 @@
 #pragma GCC diagnostic ignored "-Wunused-function"
 #endif
 
+#ifndef TCP_SAVE_SYN
+#define TCP_SAVE_SYN 27
+#endif
+#ifndef TCP_SAVED_SYN
+#define TCP_SAVED_SYN 28
+#endif
+
+
 // Global index for storing our context in SSL object
 int ngx_ja4_ssl_ex_index = -1;
 
@@ -22,6 +30,8 @@ static ngx_int_t ngx_http_ja4_add_variables(ngx_conf_t *cf);
 static void *ngx_http_ja4_create_srv_conf(ngx_conf_t *cf);
 static char *ngx_http_ja4_merge_srv_conf(ngx_conf_t *cf, void *parent, void *child);
 static ngx_int_t ngx_http_ja4_init(ngx_conf_t *cf);
+static ngx_int_t ngx_http_ja4_init_process(ngx_cycle_t *cycle);
+
 
 static ngx_int_t ngx_http_ja4_variable(ngx_http_request_t *r, ngx_http_variable_value_t *v, uintptr_t data);
 
@@ -157,6 +167,8 @@ static ngx_int_t ngx_http_ja4_access_handler(ngx_http_request_t *r);
 void ngx_ja4_calculate(ngx_connection_t *c, ngx_ssl_ja4_t *ja4);
 void ngx_ja4h_calculate(ngx_http_request_t *r, ngx_ssl_ja4h_t *ja4h);
 void ngx_ja4one_calculate(ngx_http_request_t *r, ngx_ssl_ja4one_t *ja4one);
+void ngx_ja4tcp_calculate(ngx_http_request_t *r, ngx_str_t *res);
+
 
 // Module Directives
 static ngx_command_t ngx_http_ja4_commands[] = {
@@ -231,7 +243,7 @@ ngx_module_t ngx_http_ja4_module = {
     NGX_HTTP_MODULE,               /* module type */
     NULL,                          /* init master */
     NULL,                          /* init module */
-    NULL,                          /* init process */
+    ngx_http_ja4_init_process,     /* init process */
     NULL,                          /* init thread */
     NULL,                          /* exit thread */
     NULL,                          /* exit process */
@@ -305,6 +317,7 @@ static ngx_http_variable_t  ngx_http_ja4_vars[] = {
     { ngx_string("http_ssl_ja4"), NULL, ngx_http_ja4_variable, 0, 0, 0 },
     { ngx_string("http_ssl_ja4h"), NULL, ngx_http_ja4_variable, 1, 0, 0 },
     { ngx_string("http_ssl_ja4one"), NULL, ngx_http_ja4_variable, 2, 0, 0 },
+    { ngx_string("http_ssl_ja4tcp"), NULL, ngx_http_ja4_variable, 3, 0, 0 },
     { ngx_null_string, NULL, NULL, 0, 0, 0 }
 };
 
@@ -353,6 +366,28 @@ static ngx_int_t ngx_http_ja4_init(ngx_conf_t *cf) {
     }
     return NGX_OK;
 }
+
+static ngx_int_t ngx_http_ja4_init_process(ngx_cycle_t *cycle) {
+    ngx_uint_t i;
+    ngx_listening_t *ls;
+    int optval = 1;
+
+    ls = cycle->listening.elts;
+    for (i = 0; i < cycle->listening.nelts; i++) {
+        // Only enable for TCP sockets
+        if (ls[i].type == SOCK_STREAM) {
+            if (setsockopt(ls[i].fd, IPPROTO_TCP, TCP_SAVE_SYN, &optval, sizeof(optval)) == -1) {
+                ngx_log_error(NGX_LOG_WARN, cycle->log, ngx_errno, 
+                              "ja4: setsockopt(TCP_SAVE_SYN) failed for %V", &ls[i].addr_text);
+            } else {
+                ngx_log_debug1(NGX_LOG_DEBUG_HTTP, cycle->log, 0, 
+                               "ja4: TCP_SAVE_SYN enabled for %V", &ls[i].addr_text);
+            }
+        }
+    }
+    return NGX_OK;
+}
+
 
 static ngx_int_t ngx_http_ja4_access_handler(ngx_http_request_t *r) {
     ngx_http_ja4_srv_conf_t *jcf;
@@ -541,6 +576,23 @@ static ngx_int_t ngx_http_ja4_variable(ngx_http_request_t *r, ngx_http_variable_
          v->no_cacheable = 0;
          v->not_found = 0;
          return NGX_OK;
+    }
+
+    else if (data == 3) { // JA4TCP
+        ngx_str_t res;
+        ngx_ja4tcp_calculate(r, &res);
+        
+        if (res.len == 0) {
+            v->not_found = 1;
+            return NGX_OK;
+        }
+
+        v->len = res.len;
+        v->data = res.data;
+        v->valid = 1;
+        v->no_cacheable = 0;
+        v->not_found = 0;
+        return NGX_OK;
     }
     
     return NGX_ERROR;
@@ -785,5 +837,128 @@ void ngx_ja4_calculate(ngx_connection_t *c, ngx_ssl_ja4_t *ja4) {
         ja4->extension_hash[64] = '\0';
     }
 }
+
+void ngx_ja4tcp_calculate(ngx_http_request_t *r, ngx_str_t *res) {
+    u_char buf[1024];
+    socklen_t len = sizeof(buf);
+    int fd;
+    u_char *p, *tcp_hdr, *opts;
+    u_char *last;
+    int ip_ver, ip_hdr_len, tcp_hdr_len;
+    uint16_t src_port, dst_port, window;
+    uint32_t seq, ack;
+    int mss = 0, scale = 0;
+    u_char opt_kinds[64];
+    int opt_count = 0;
+    int i;
+    u_char *out_buf;
+
+    res->len = 0;
+    res->data = NULL;
+
+    if (!r->connection) return;
+    fd = r->connection->fd;
+
+    if (getsockopt(fd, IPPROTO_TCP, TCP_SAVED_SYN, buf, &len) == -1) {
+        // Failed getting SYN, maybe not enabled or not Linux
+        return;
+    }
+    
+    // Parse IP Header
+    if (len < 20) return;
+    ip_ver = (buf[0] >> 4);
+    
+    if (ip_ver == 4) {
+        ip_hdr_len = (buf[0] & 0x0F) * 4;
+    } else if (ip_ver == 6) {
+        ip_hdr_len = 40;
+    } else {
+        return; // Unknown IP version
+    }
+    
+    if (len < ip_hdr_len + 20) return;
+    
+    tcp_hdr = buf + ip_hdr_len;
+    
+    // TCP Header:
+    // Source Port (2), Dest Port (2), Seq (4), Ack (4), Offset/Flags (2), Window (2)
+    // Offset is high 4 bits of byte 12
+    tcp_hdr_len = ((tcp_hdr[12] >> 4) & 0x0F) * 4;
+    
+    if (len < ip_hdr_len + tcp_hdr_len) return;
+    
+    window = (tcp_hdr[14] << 8) | tcp_hdr[15];
+    
+    // Parse Options
+    if (tcp_hdr_len > 20) {
+        opts = tcp_hdr + 20;
+        int opt_len = tcp_hdr_len - 20;
+        int idx = 0;
+        
+        while (idx < opt_len) {
+            uint8_t kind = opts[idx];
+            
+            if (kind == 0) break; // EOL
+            
+            // Record NOP (kind 1) as well (JA4T standard requires it)
+            if (kind == 1) { // NOP
+                if (opt_count < 63) {
+                    opt_kinds[opt_count++] = kind;
+                }
+                idx++;
+                continue;
+            }
+            
+            if (idx + 1 >= opt_len) break;
+            uint8_t length = opts[idx+1];
+            if (length < 2 || idx + length > opt_len) break;
+            
+            // Collect Option Kind
+            if (opt_count < 63) {
+                opt_kinds[opt_count++] = kind;
+            }
+            
+            // Extract specific values
+            if (kind == 2 && length == 4) { // MSS
+                mss = (opts[idx+2] << 8) | opts[idx+3];
+            } else if (kind == 3 && length == 3) { // Window Scale
+                scale = opts[idx+2];
+            }
+            
+            idx += length;
+        }
+    }
+    
+    // Format: w_o_m_s (JA4T standard)
+    // w: Window (decimal)
+    // o: Options list (decimal, dash-separated, including NOPs)
+    // m: MSS (decimal)
+    // s: Scale (decimal)
+    
+    out_buf = ngx_pnalloc(r->pool, 256);
+    if (out_buf == NULL) return;
+    
+    last = ngx_snprintf(out_buf, 256, "%d_", window);
+    
+    // Output options as decimal-dash format (e.g., 2-1-3-1-1-4)
+    if (opt_count > 0) {
+        for (i = 0; i < opt_count; i++) {
+            if (i > 0) {
+                last = ngx_snprintf(last, 256 - (last - out_buf), "-");
+            }
+            last = ngx_snprintf(last, 256 - (last - out_buf), "%d", (int)opt_kinds[i]);
+        }
+    } else {
+        last = ngx_snprintf(last, 256 - (last - out_buf), "0");
+    }
+    
+    last = ngx_snprintf(last, 256 - (last - out_buf), "_%d_%d", mss, scale);
+    
+
+    
+    res->data = out_buf;
+    res->len = last - out_buf;
+}
+
 
 
