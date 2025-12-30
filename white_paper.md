@@ -451,8 +451,9 @@ Unlike JA4 or JA4H where NGINX exposes full data, standard NGINX optimization **
 The module reconstructs the client's identity by inquiring NGINX's internal state, which reflects what the client successfully negotiated.
 
 **The Logic**:
-1.  **Initial Window Size (`init_window`)**: This controls the flow control window. Chrome, Firefox, and cURL often request different window sizes to optimize throughput. NGINX stores this in `h2c->init_window`.
-2.  **Max Frame Size (`frame_size`)**: The maximum payload size for a single HTTP/2 frame. Clients set this based on their buffer preferences. NGINX stores this in `h2c->frame_size`.
+1.  **Initial Window Size (`init_window`)**: This controls the stream-level flow control window. Chrome, Firefox, and cURL often request different window sizes to optimize throughput. NGINX stores this in `h2c->init_window`.
+2.  **Max Frame Size (`frame_size`)**: The maximum payload size for a single HTTP/2 frame. `h2c->frame_size`.
+3.  **Connection Window (`send_window`)**: Controlled by `WINDOW_UPDATE` frames on Stream 0. Research shows highly distinct values (Chrome ~15MB, Firefox ~12MB). `h2c->send_window`.
 
 **Visualization of the Reconstruction Process**:
 
@@ -465,31 +466,44 @@ sequenceDiagram
     Note over C,N: TLS Handshake Complete
 
     C->>N: HTTP/2 SETTINGS Frame
-    Note right of C: 1. Init Window = 6MB<br/>2. Max Frame = 16KB<br/>3. Enable Push = 0 (Ignored)
+    Note right of C: 1. Init Window = 6MB<br/>2. Max Frame = 16KB
 
     activate N
     N->>N: Parse SETTINGS
     N->>N: Update h2c->init_window = 6291456
     N->>N: Update h2c->frame_size = 16384
-    N->>N: Discard "Enable Push" (Not stored)
     deactivate N
 
-    C->>N: HEAD / HTTP/2.0
+    C->>N: WINDOW_UPDATE (Stream 0)
+    Note right of C: Increment Connection Window (+15MB)
+    
+    activate N
+    N->>N: Update h2c->send_window += 15663105
+    deactivate N
+
+    C->>N: POST / HTTP/2.0
     
     activate M
     Note over M: Intervention Point
-    M->>N: Read h2c->init_window
+    M->>N: Read h2c->init_window (Stream)
     N-->>M: Return 6291456
-    M->>N: Read h2c->frame_size
-    N-->>M: Return 16384
+    M->>N: Read h2c->send_window (Conn)
+    N-->>M: Return 15728640 (15MB)
     
-    M->>M: Create Pair List: [(ID:4, Val:6291456), (ID:5, Val:16384)]
+    M->>M: Create Pair List
     M->>M: Hash Pairs -> "70946d4d1524"
-    M->>M: Format -> "h220_02_70946d4d1524_6291456_0"
+    M->>M: Format -> "h220_02_..._6291456_15728640_0"
     deactivate M
 ```
 
 **Why this matters**: Even without capturing *every* setting, the combination of Window Size + Frame Size creates a distinctive signature. A Python script using `h2` library often defaults to different flow control values than a real Chrome browser, allowing detection.
+
+#### 2.5.3 Connection-Level Window Logic (New Enhancement)
+Research indicates that the **Connection-Level Window** (controlled via `WINDOW_UPDATE` frames on Stream 0) is a highly distinguishing feature:
+- Chrome: ~15 MB
+- Firefox: ~12 MB
+- curl: ~32 MB
+- **This Module**: Reconstructs this value from `h2c->send_window` to add a critical 3rd dimension to the fingerprint, significantly reducing spoofing capability without patching NGINX.
 
 ### 2.6 Why JA4ONE (Combined) is Powerful
 
@@ -1274,25 +1288,27 @@ Upgrade-Insecure-Requests: 1
 
 ### 6.4 JA4S (HTTP/2 Fingerprint)
 
-**Format**: `h2<ver>_<cnt>_<hash>_<window>_<order>_<priority>`
+**Format**: `h2<ver>_<cnt>_<hash>_<window>_<conn_window>_<order>_<priority>`
 
-**Specific NGINX Implementation Format**: `h2<ver>_<cnt>_<hash>_<window>_0` (Simplified Construction)
+**Specific NGINX Implementation Format**: `h2<ver>_<cnt>_<hash>_<window>_<conn_window>_0`
 
 | Component | Description | Example (No-Patch) |
 |-----------|-------------|--------------------|
 | `ver` | HTTP/2 Protocol Version | `20` (HTTP/2.0) |
 | `cnt` | Count of captured settings | `02` (Window, Frame Size) |
 | `hash` | SHA256 of available settings | `70946d4d1524` |
-| `window` | Initial Window Size | `10485760` |
+| `window` | Initial Stream Window Size | `10485760` |
+| `conn_window` | Connection Flow Control Window | `15663105` |
 
-**Example Output**: `h220_02_70946d4d1524_10485760_0`
+**Example Output**: `h220_02_70946d4d1524_10485760_15663105_0`
 
 **Reconstructed Settings**:
-In "No-Patch" mode, the module reliably reconstructs these core parameters:
-1.  `INITIAL_WINDOW_SIZE` (ID 0x4)
-2.  `MAX_FRAME_SIZE` (ID 0x5)
+The module uses NGINX's internal state to retrieve:
+1.  `INITIAL_WINDOW_SIZE` (from SETTINGS)
+2.  `MAX_FRAME_SIZE` (from SETTINGS)
+3.  `CONNECTION_WINDOW` (from WINDOW_UPDATE frames)
 
-This approach ensures zero conflict with future NGINX updates while reliably identifying the client's flow control profile.
+This creates a high-entropy fingerprint closer to the "Real" JA4S while remaining strictly "No-Patch".
 
 ### 6.5 JA4ONE (Combined Fingerprint)
 

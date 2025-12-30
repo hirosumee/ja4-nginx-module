@@ -1152,11 +1152,14 @@ void ngx_ja4s_calculate(ngx_http_request_t *r, ngx_ssl_ja4s_t *ja4s) {
     ja4s->settings_hash[12] = '\0'; 
     
     // 4. Construct Final Fingerprint
-    // Format: h2<ProtoVer>_<Count>_<Hash>_<InitWindow>_<ParamOrder?>_<Priority?>
+    // Format: h2<ProtoVer>_<Count>_<Hash>_<InitWindow>_<ConnectionWindow>_<Priority?>
+    // "Connection Window" (h2c->send_window) tracks the client's advertised connection-level flow control.
+    // This is a critical signal mentioned in research (e.g. Chrome ~15MB, Firefox ~12MB).
     
-    ngx_snprintf((u_char*)ja4s->fingerprint, 255, "h220_%02d_%s_%uz_0", 
+    ngx_snprintf((u_char*)ja4s->fingerprint, 255, "h220_%02d_%s_%uz_%uz_0", 
                  cnt, 
                  ja4s->settings_hash,
-                 h2c->init_window); 
+                 h2c->init_window,
+                 h2c->send_window); 
 }
 
