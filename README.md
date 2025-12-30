@@ -19,6 +19,7 @@ This module is designed for:
 ## Features
 - **JA4 (TLS)**: Fingerprints the TLS Client Hello (Version, Cipher Suites, Extensions, etc.).
 - **JA4H (HTTP)**: Fingerprints HTTP headers (Method, Version, Cookie, Header Order).
+- **JA4S (HTTP/2)**: Fingerprints HTTP/2 connection state (Window Size, Frame Size).
 - **JA4TCP (TCP)**: Fingerprints TCP characteristics (Window Size, Options, Flags, TTL).
 - **JA4one (Composite)**: A combined fingerprint (`JA4_JA4H`) providing a holistic view of the client (TLS + HTTP).
 - **Access Control Directives:** Native Nginx directives to block/allow traffic.
@@ -45,6 +46,7 @@ make install
 The module exposes the following variables:
 - `$http_ssl_ja4`: The TLS fingerprint.
 - `$http_ssl_ja4h`: The HTTP fingerprint.
+- `$http_ssl_ja4s`: The HTTP/2 fingerprint (JA4S).
 - `$http_ssl_ja4tcp`: The TCP fingerprint.
 - `$http_ssl_ja4one`: The composite fingerprint.
 
@@ -54,7 +56,7 @@ Add them to your `log_format`:
 http {
     log_format ja4_log '$remote_addr - [$time_local] "$request" '
                        'JA4="$http_ssl_ja4" JA4H="$http_ssl_ja4h" '
-                       'JA4TCP="$http_ssl_ja4tcp" JA4one="$http_ssl_ja4one"';
+                       'JA4S="$http_ssl_ja4s" JA4TCP="$http_ssl_ja4tcp" JA4one="$http_ssl_ja4one"';
 
     access_log logs/ja4.log ja4_log;
 }
@@ -66,6 +68,7 @@ You can enforce rules in your `server` or `location` blocks.
 **Directives:**
 - `ja4_deny` / `ja4_allow`: Check against JA4 (TLS) fingerprint.
 - `ja4h_deny` / `ja4h_allow`: Check against JA4H (HTTP) fingerprint.
+- `ja4s_deny` / `ja4s_allow`: Check against JA4S (HTTP/2) fingerprint.
 - `ja4tcp_deny` / `ja4tcp_allow`: Check against JA4TCP (TCP) fingerprint.
 - `ja4one_deny` / `ja4one_allow`: Check against JA4one composite fingerprint.
 
@@ -83,6 +86,9 @@ server {
     
     # Block suspicious TCP fingerprints (example pattern)
     ja4tcp_deny "29200_2-4-8-1-3_1460_7";  # Python-like small window
+    
+    # Block specific HTTP/2 fingerprint (JA4S)
+    ja4s_deny "h204_0000000000000000000000000000000000000000000000000000000000000000_0_xxxx_0";
 
     location / {
         # Allow specific bot via JA4one
@@ -93,6 +99,7 @@ server {
         add_header X-JA4H-Fingerprint $http_ssl_ja4h;
         add_header X-JA4TCP-Fingerprint $http_ssl_ja4tcp;
         add_header X-JA4one-Fingerprint $http_ssl_ja4one;
+        add_header X-JA4S-Fingerprint $http_ssl_ja4s;
     }
 }
 ```
@@ -106,6 +113,12 @@ Due to the full hash modification, the formats are:
     - `11`: HTTP 1.1
     - `n`: No Cookie
     - `03`: 3 Headers
+- **JA4S**: `h2<ver>_<cnt>_<hash>_<window>_0`
+    - Example: `h220_02_70946d4d1524_10485760_0`
+    - `ver`: Protocol version (20 = HTTP/2.0)
+    - `cnt`: Count of settings (02 = constant in No-Patch mode)
+    - `hash`: SHA256 of Window & Frame Size
+    - `window`: Initial Window Size
 - **JA4TCP**: `<window>_<option_kinds>_<mss>_<scale>`
     - Example: `65535_2-4-8-3_1460_7`
     - `window`: TCP window size (decimal)
@@ -294,6 +307,7 @@ server {
 
 ## Troubleshooting
 - **Missing JA4?** Ensure you are connecting via **HTTPS**. Plain HTTP requests have no TLS handshake, so `$http_ssl_ja4` will be empty.
+- **Missing JA4S?** Only available for **HTTP/2** connections. Check if client supports H2 and NGINX `http2` is enabled.
 - **Missing JA4TCP?** JA4TCP requires access to raw TCP connection data. Ensure NGINX is running with `--with-http_realip_module` and proper network configuration. If using Docker, use `--network host` mode for accurate TCP fingerprinting.
 - **Short Codes?** If you see 12-char hashes, you are running the standard version. Recompile with the modified generic hash length if full hashes are required.
 

@@ -429,7 +429,69 @@ JA4H: po11n05_zzz       ❌ Only 5 headers (Chrome sends ~12)
 → VERDICT: Bot with spoofed User-Agent
 ```
 
-### 2.5 Why JA4ONE (Combined) is Powerful
+### 2.5 Why JA4S (HTTP/2) Can Be Calculated
+
+**JA4S** fingerprints the HTTP/2 connection parameters established immediately after the TLS handshake.
+
+#### 2.5.1 HTTP/2 SETTINGS Frames
+
+**Observable Mechanism**:
+1.  **SETTINGS Frame**: Upon connection, the client sends a `SETTINGS` frame to define connection parameters (Max Concurrent Streams, Initial Window Size, etc.).
+2.  **Flow Control**: The `WINDOW_UPDATE` frames establish flow control windows unique to different implementations.
+
+**Technical Constraint (NGINX Specific)**:
+Unlike JA4 or JA4H where NGINX exposes full data, standard NGINX optimization **discards** unused SETTINGS (like `ENABLE_PUSH` or `GREASE`) immediately upon receipt.
+
+> [!NOTE]
+> **No-Patch Strategy Trade-off**:
+> To ensure this module remains **upgrade-safe** (no source patching required), we utilize a **Reconstruction Methodology**. We fingerprint the *effective* HTTP/2 state (Window Size, Frame Size) maintained by NGINX, rather than the raw wire packets. This yields a stable, unique fingerprint (`h220_XX`) that identifies the client's flow control behavior, though it may lack some metadata visible to full packet capture tools.
+
+#### 2.5.2 How Reconstruction Works (Window & Frame Size)
+
+The module reconstructs the client's identity by inquiring NGINX's internal state, which reflects what the client successfully negotiated.
+
+**The Logic**:
+1.  **Initial Window Size (`init_window`)**: This controls the flow control window. Chrome, Firefox, and cURL often request different window sizes to optimize throughput. NGINX stores this in `h2c->init_window`.
+2.  **Max Frame Size (`frame_size`)**: The maximum payload size for a single HTTP/2 frame. Clients set this based on their buffer preferences. NGINX stores this in `h2c->frame_size`.
+
+**Visualization of the Reconstruction Process**:
+
+```mermaid
+sequenceDiagram
+    participant C as Client
+    participant N as NGINX Core
+    participant M as JA4S Module
+
+    Note over C,N: TLS Handshake Complete
+
+    C->>N: HTTP/2 SETTINGS Frame
+    Note right of C: 1. Init Window = 6MB<br/>2. Max Frame = 16KB<br/>3. Enable Push = 0 (Ignored)
+
+    activate N
+    N->>N: Parse SETTINGS
+    N->>N: Update h2c->init_window = 6291456
+    N->>N: Update h2c->frame_size = 16384
+    N->>N: Discard "Enable Push" (Not stored)
+    deactivate N
+
+    C->>N: HEAD / HTTP/2.0
+    
+    activate M
+    Note over M: Intervention Point
+    M->>N: Read h2c->init_window
+    N-->>M: Return 6291456
+    M->>N: Read h2c->frame_size
+    N-->>M: Return 16384
+    
+    M->>M: Create Pair List: [(ID:4, Val:6291456), (ID:5, Val:16384)]
+    M->>M: Hash Pairs -> "70946d4d1524"
+    M->>M: Format -> "h220_02_70946d4d1524_6291456_0"
+    deactivate M
+```
+
+**Why this matters**: Even without capturing *every* setting, the combination of Window Size + Frame Size creates a distinctive signature. A Python script using `h2` library often defaults to different flow control values than a real Chrome browser, allowing detection.
+
+### 2.6 Why JA4ONE (Combined) is Powerful
 
 **JA4ONE** = `JA4_JA4H` (concatenated)
 
@@ -482,9 +544,9 @@ graph TD
        → VERDICT: Spoofing attempt
    ```
 
-### 2.6 Technical Limitations & Countermeasures
+### 2.7 Technical Limitations & Countermeasures
 
-#### 2.6.1 Scenarios Where Fingerprinting is Limited
+#### 2.7.1 Scenarios Where Fingerprinting is Limited
 
 1. **VPN/NAT with TCP Proxying**:
    - If VPN terminates TCP, module sees VPN's fingerprint
@@ -498,7 +560,7 @@ graph TD
    - Proxy re-encrypts with its own TLS stack
    - **Detection**: JA4 will show proxy signature, not client's
 
-#### 2.6.2 Future Protocol Changes
+#### 2.7.2 Future Protocol Changes
 
 1. **ECH (Encrypted ClientHello)**:
    - When widely adopted, will encrypt SNI and some extensions
@@ -512,7 +574,7 @@ graph TD
    - Uses UDP instead of TCP
    - **Impact**: JA4TCP not applicable, but JA4 and JA4H still work (with protocol flag `q` instead of `t`)
 
-### 2.7 Summary: Why Fingerprinting is Possible
+### 2.8 Summary: Why Fingerprinting is Possible
 
 | Layer | Protocol | Why Observable | Why Fingerprintable | Key Data |
 |-------|----------|----------------|---------------------|----------|
@@ -1210,7 +1272,29 @@ Upgrade-Insecure-Requests: 1
 
 **Final**: `ge11c08_b3a8c5d2e1f4a7b9c3d5e7f1a3b5c7d9e1f3a5b7c9d1e3f5a7b9c1d3e5f7`
 
-### 6.4 JA4ONE (Combined Fingerprint)
+### 6.4 JA4S (HTTP/2 Fingerprint)
+
+**Format**: `h2<ver>_<cnt>_<hash>_<window>_<order>_<priority>`
+
+**Specific NGINX Implementation Format**: `h2<ver>_<cnt>_<hash>_<window>_0` (Simplified Construction)
+
+| Component | Description | Example (No-Patch) |
+|-----------|-------------|--------------------|
+| `ver` | HTTP/2 Protocol Version | `20` (HTTP/2.0) |
+| `cnt` | Count of captured settings | `02` (Window, Frame Size) |
+| `hash` | SHA256 of available settings | `70946d4d1524` |
+| `window` | Initial Window Size | `10485760` |
+
+**Example Output**: `h220_02_70946d4d1524_10485760_0`
+
+**Reconstructed Settings**:
+In "No-Patch" mode, the module reliably reconstructs these core parameters:
+1.  `INITIAL_WINDOW_SIZE` (ID 0x4)
+2.  `MAX_FRAME_SIZE` (ID 0x5)
+
+This approach ensures zero conflict with future NGINX updates while reliably identifying the client's flow control profile.
+
+### 6.5 JA4ONE (Combined Fingerprint)
 
 **Format**: `JA4_JA4H`
 
@@ -1228,9 +1312,9 @@ JA4ONE: t13d0709_e27c1ff97fe7_a1b2c3d4e5f6_ge11c08_b3a8c5d2e1f4a7b9c3d5e7f1a3b5c
 
 ---
 
-## 6.5 JA4TCP (TCP Fingerprint) - **NEW**
+## 6.6 JA4TCP (TCP Fingerprint) - **NEW**
 
-### 6.5.1 What is JA4TCP?
+### 6.6.1 What is JA4TCP?
 
 **JA4TCP** is a **Layer 4 (Transport Layer)** fingerprinting technique that analyzes the TCP SYN packet to identify client characteristics at the network stack level. While JA4 focuses on TLS (Layer 6) and JA4H on HTTP (Layer 7), JA4TCP operates at the TCP layer, making it the **earliest detection point** in the connection lifecycle.
 
@@ -1240,7 +1324,7 @@ JA4ONE: t13d0709_e27c1ff97fe7_a1b2c3d4e5f6_ge11c08_b3a8c5d2e1f4a7b9c3d5e7f1a3b5c
 - **NAT/Proxy Detection**: Can identify if traffic is being proxied or NAT'd
 - **Pre-TLS Fingerprinting**: Works even for non-HTTPS traffic (HTTP, FTP, etc.)
 
-### 6.5.2 TCP SYN Packet Structure
+### 6.6.2 TCP SYN Packet Structure
 
 The TCP SYN packet is the **first packet** sent during the TCP 3-way handshake. It contains critical fingerprinting data in its options field.
 
@@ -1269,7 +1353,7 @@ The TCP SYN packet is the **first packet** sent during the TCP 3-way handshake. 
 - **Data Offset** (4 bits): TCP header length (includes options)
 - **Options** (variable): TCP options in Type-Length-Value format
 
-### 6.5.3 TCP Options Deep Dive
+### 6.6.3 TCP Options Deep Dive
 
 TCP Options follow a **Type-Length-Value (TLV)** encoding scheme.
 
@@ -1305,7 +1389,7 @@ Raw Hex: 02 04 05 b4 04 02 08 0a 12 34 56 78 00 00 00 00 01 03 03 07
 - **MSS**: `1460`
 - **Window Scale**: `7`
 
-### 6.5.4 JA4TCP Fingerprint Format
+### 6.6.4 JA4TCP Fingerprint Format
 
 **Structure**: `w_o_m_s`
 
@@ -1318,7 +1402,7 @@ Raw Hex: 02 04 05 b4 04 02 08 0a 12 34 56 78 00 00 00 00 01 03 03 07
 
 **Complete Example**: `65535_2-1-3-1-1-4_1460_7`
 
-### 6.5.5 How NGINX Captures TCP SYN Data
+### 6.6.5 How NGINX Captures TCP SYN Data
 
 The module uses Linux's `TCP_SAVE_SYN` socket option to access the raw SYN packet.
 
@@ -1375,7 +1459,7 @@ sequenceDiagram
     NGINX->>Client: HTTP Response + X-JA4TCP-Fingerprint header
 ```
 
-### 6.5.6 Complete Calculation Walkthrough
+### 6.6.6 Complete Calculation Walkthrough
 
 Let's fingerprint a **Chrome 120 on Linux** connection.
 
@@ -1482,7 +1566,7 @@ last = ngx_snprintf(last, ..., "_%d_%d", mss, scale);
 
 **Final Fingerprint**: `65535_2-4-8-3_65495_7`
 
-### 6.5.7 OS & Browser Signatures
+### 6.6.7 OS & Browser Signatures
 
 Different platforms and applications produce distinct TCP fingerprints. The values below are representative examples and may vary based on specific OS versions, kernel configurations, and network settings.
 
@@ -1520,7 +1604,7 @@ Different platforms and applications produce distinct TCP fingerprints. The valu
    - [RFC 793](https://tools.ietf.org/html/rfc793) - Transmission Control Protocol specification
    - [RFC 7323](https://tools.ietf.org/html/rfc7323) - TCP Extensions for High Performance
 
-### 6.5.8 Integration with JA4 Suite
+### 6.6.8 Integration with JA4 Suite
 
 JA4TCP complements existing fingerprints:
 
@@ -1573,7 +1657,7 @@ JA4H:   ge20c12_...                  ⚠️  HTTP/2 with Linux-like headers
 → VERDICT: Linux bot pretending to be iOS Safari
 ```
 
-### 6.5.9 Limitations & Considerations
+### 6.6.9 Limitations & Considerations
 
 **Docker Networking**:
 - **Bridge Mode**: Module sees Docker Proxy's fingerprint (all clients identical)

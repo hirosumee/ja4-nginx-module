@@ -5,6 +5,9 @@ if test -n "$ngx_module_link"; then
     ngx_module_name=ngx_http_ja4_module
     ngx_module_srcs="$ngx_addon_dir/ngx_http_ja4_module.c"
     
+    # Add access to internal HTTP/2 headers (Option 2/3 requirement)
+    CFLAGS="$CFLAGS -I src/http/v2"
+    
     . auto/module
 else
     HTTP_MODULES="$HTTP_MODULES ngx_http_ja4_module"

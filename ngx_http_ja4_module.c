@@ -7,6 +7,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include "ngx_http_ja4_module.h"
+#include <ngx_http_v2.h>
 
 #if (NGX_GCC)
 #pragma GCC diagnostic ignored "-Wdeclaration-after-statement"
@@ -168,6 +169,36 @@ void ngx_ja4_calculate(ngx_connection_t *c, ngx_ssl_ja4_t *ja4);
 void ngx_ja4h_calculate(ngx_http_request_t *r, ngx_ssl_ja4h_t *ja4h);
 void ngx_ja4one_calculate(ngx_http_request_t *r, ngx_ssl_ja4one_t *ja4one);
 void ngx_ja4tcp_calculate(ngx_http_request_t *r, ngx_str_t *res);
+void ngx_ja4s_calculate(ngx_http_request_t *r, ngx_ssl_ja4s_t *ja4s);
+
+
+// --- Internal HTTP/2 Structure Definitions (Simulated) ---
+// Since we don't have direct access to internal headers easily, we define necessary subsets.
+// This matches standard NGINX 1.18+ structure beginning.
+typedef struct {
+    ngx_uint_t                      id;
+    ngx_uint_t                      value;
+} ngx_http_v2_setting_t;
+
+typedef struct {
+    ngx_connection_t               *connection;
+    ngx_http_connection_t          *http_connection;
+    ngx_uint_t                      processing;
+    
+    // In NGINX, settings are usually further down, but let's assume we can access them via offset or if we include the header?
+    // Wait, reusing exact definition is risky if it changes.
+    // However, for standard NGINX, accessing `init_window` is common.
+    
+    // We will attempt to rely on standard NGINX includes being available during build.
+    // If this fails, we will need to revisit.
+    // BUT since I am writing this into the file, I should define a "compatible" struct 
+    // that mimics the layout just enough, or assume we can include the file.
+} ngx_http_v2_connection_subset_t;
+// NOTE: I will strictly rely on `ngx_http_v2_module.h` implicit availability or similar? No.
+// I'll proceed with the assumption we can access `ngx_ssl_ja4s_t` logic.
+// I'll add the logic now.
+
+
 
 
 // Module Directives
@@ -215,6 +246,20 @@ static ngx_command_t ngx_http_ja4_commands[] = {
       NULL },
 
     { ngx_string("ja4one_allow"),
+      NGX_HTTP_MAIN_CONF|NGX_HTTP_SRV_CONF|NGX_HTTP_LOC_CONF|NGX_CONF_TAKE1,
+      ngx_http_ja4_handler,
+      NGX_HTTP_SRV_CONF_OFFSET,
+      0,
+      NULL },
+
+    { ngx_string("ja4s_deny"),
+      NGX_HTTP_MAIN_CONF|NGX_HTTP_SRV_CONF|NGX_HTTP_LOC_CONF|NGX_CONF_TAKE1,
+      ngx_http_ja4_handler,
+      NGX_HTTP_SRV_CONF_OFFSET,
+      0,
+      NULL },
+
+    { ngx_string("ja4s_allow"),
       NGX_HTTP_MAIN_CONF|NGX_HTTP_SRV_CONF|NGX_HTTP_LOC_CONF|NGX_CONF_TAKE1,
       ngx_http_ja4_handler,
       NGX_HTTP_SRV_CONF_OFFSET,
@@ -269,6 +314,7 @@ static char *ngx_http_ja4_merge_srv_conf(ngx_conf_t *cf, void *parent, void *chi
     if (conf->rules == NULL) conf->rules = prev->rules;
     if (conf->rules_h == NULL) conf->rules_h = prev->rules_h;
     if (conf->rules_one == NULL) conf->rules_one = prev->rules_one;
+    if (conf->rules_s == NULL) conf->rules_s = prev->rules_s;
 
     return NGX_CONF_OK;
 }
@@ -285,6 +331,8 @@ static char *ngx_http_ja4_handler(ngx_conf_t *cf, ngx_command_t *cmd, void *conf
         rules_ptr = &jcf->rules_h;
     } else if (ngx_strstr(cmd->name.data, (u_char *)"ja4one_")) {
         rules_ptr = &jcf->rules_one;
+    } else if (ngx_strstr(cmd->name.data, (u_char *)"ja4s_")) {
+        rules_ptr = &jcf->rules_s;
     } else {
         rules_ptr = &jcf->rules;
     }
@@ -318,6 +366,7 @@ static ngx_http_variable_t  ngx_http_ja4_vars[] = {
     { ngx_string("http_ssl_ja4h"), NULL, ngx_http_ja4_variable, 1, 0, 0 },
     { ngx_string("http_ssl_ja4one"), NULL, ngx_http_ja4_variable, 2, 0, 0 },
     { ngx_string("http_ssl_ja4tcp"), NULL, ngx_http_ja4_variable, 3, 0, 0 },
+    { ngx_string("http_ssl_ja4s"), NULL, ngx_http_ja4_variable, 4, 0, 0 },
     { ngx_null_string, NULL, NULL, 0, 0, 0 }
 };
 
@@ -492,6 +541,33 @@ static ngx_int_t ngx_http_ja4_access_handler(ngx_http_request_t *r) {
              }
         }
     }
+
+    // 4. JA4S Checks (HTTP/2)
+    if (jcf->rules_s) {
+        ngx_ssl_ja4s_t ja4s;
+        ngx_str_t fp;
+        ngx_uint_t i;
+        ngx_http_ja4_rule_t *rules;
+        
+        ngx_memzero(&ja4s, sizeof(ngx_ssl_ja4s_t));
+        
+        ngx_ja4s_calculate(r, &ja4s);
+        
+        if (ja4s.fingerprint[0] != '\0') {
+            fp.data = (u_char*)ja4s.fingerprint;
+            fp.len = ngx_strlen(ja4s.fingerprint);
+            
+            rules = jcf->rules_s->elts;
+            for (i = 0; i < jcf->rules_s->nelts; i++) {
+                 if (rules[i].name.len == fp.len && ngx_strncmp(rules[i].name.data, fp.data, fp.len) == 0) {
+                     if (rules[i].type == NGX_HTTP_JA4_DENY) {
+                         ngx_log_error(NGX_LOG_ERR, r->connection->log, 0, "access forbidden by JA4S: %V", &fp);
+                         return NGX_HTTP_FORBIDDEN;
+                     }
+                 }
+            }
+        }
+    }
     
     return NGX_DECLINED;
 }
@@ -595,6 +671,27 @@ static ngx_int_t ngx_http_ja4_variable(ngx_http_request_t *r, ngx_http_variable_
         return NGX_OK;
     }
     
+    else if (data == 4) { // JA4S
+        ngx_ssl_ja4s_t ja4s;
+        ngx_memzero(&ja4s, sizeof(ngx_ssl_ja4s_t));
+        
+        ngx_ja4s_calculate(r, &ja4s);
+        
+        if (ja4s.fingerprint[0] == '\0') {
+            v->not_found = 1;
+            return NGX_OK;
+        }
+
+        v->len = ngx_strlen(ja4s.fingerprint);
+        v->data = ngx_pnalloc(r->pool, v->len + 1);
+        if (v->data == NULL) return NGX_ERROR;
+        ngx_memcpy(v->data, ja4s.fingerprint, v->len);
+        v->valid = 1;
+        v->no_cacheable = 0;
+        v->not_found = 0;
+        return NGX_OK;
+    }
+
     return NGX_ERROR;
 }
 
@@ -961,4 +1058,105 @@ void ngx_ja4tcp_calculate(ngx_http_request_t *r, ngx_str_t *res) {
 }
 
 
+
+
+
+// HTTP/2 Setting IDs (Standard RFC 7540)
+#define JA4S_SETTING_HEADER_TABLE_SIZE      0x1
+#define JA4S_SETTING_ENABLE_PUSH            0x2
+#define JA4S_SETTING_MAX_CONCURRENT_STREAMS 0x3
+#define JA4S_SETTING_INITIAL_WINDOW_SIZE    0x4
+#define JA4S_SETTING_MAX_FRAME_SIZE         0x5
+#define JA4S_SETTING_MAX_HEADER_LIST_SIZE   0x6
+
+typedef struct {
+    uint32_t id;
+    uint32_t val;
+} ngx_ja4s_setting_pair_t;
+
+static int ngx_ja4s_cmp_pair(const void *a, const void *b) {
+    return (int)(((const ngx_ja4s_setting_pair_t *)a)->id - ((const ngx_ja4s_setting_pair_t *)b)->id);
+}
+
+void ngx_ja4s_calculate(ngx_http_request_t *r, ngx_ssl_ja4s_t *ja4s) {
+    ngx_http_v2_stream_t *stream;
+    ngx_http_v2_connection_t *h2c;
+    ngx_ja4s_setting_pair_t pairs[32];
+    uint32_t cnt;
+    uint32_t i;
+    u_char buf[1024];
+    u_char *p, *last;
+    u_char hash[SHA256_DIGEST_LENGTH];
+    SHA256_CTX sha256;
+
+    // 1. Check HTTP/2 Version (Robust check)
+    if (r->http_version < NGX_HTTP_VERSION_20) {
+        return;
+    }
+    
+    // 2. Access Internal Structures (Safe with Patch)
+    if (r->stream == NULL) return;
+    
+    stream = r->stream;
+    h2c = stream->connection;
+    
+    if (h2c == NULL) return;
+
+    // 3. Process Settings (No-Patch / Reconstruction Mode)
+    // Since we cannot patch NGINX to capture raw settings, we reconstruct the known settings
+    // from the connection state. This loses "Order" and "Unknown/Grease" settings,
+    // but ensures upgrade compatibility.
+    
+    cnt = 0;
+    
+    // Setting 1: INITIAL_WINDOW_SIZE (ID 4)
+    // h2c->init_window tracks valid window size
+    pairs[cnt].id = JA4S_SETTING_INITIAL_WINDOW_SIZE;
+    pairs[cnt].val = (uint32_t)h2c->init_window;
+    cnt++;
+    
+    // Setting 2: MAX_FRAME_SIZE (ID 5)
+    // h2c->frame_size tracks frame size
+    pairs[cnt].id = JA4S_SETTING_MAX_FRAME_SIZE;
+    pairs[cnt].val = (uint32_t)h2c->frame_size;
+    cnt++;
+    
+    // Setting 3: HEADER_TABLE_SIZE (ID 1)
+    // h2c->hpack.size tracks table size? NGINX uses dynamic table but stores limit?
+    // h2c->hpack.size seems to be current size.
+    // NGINX doesn't store the SETTING value if it's strictly internal. 
+    // We will skip it to be safe, or include if we can verify correctness.
+    // For now, we stick to robust fields.
+    
+    // Sort logic (Strictly by ID for consistency)
+    qsort(pairs, cnt, sizeof(ngx_ja4s_setting_pair_t), ngx_ja4s_cmp_pair);
+    
+    // Generate Hash String: id:val,id:val,...
+    p = buf;
+    last = buf + sizeof(buf);
+    
+    for (i = 0; i < cnt; i++) {
+        if (i > 0) {
+            p = ngx_snprintf(p, last - p, ",");
+        }
+        p = ngx_snprintf(p, last - p, "%ui:%ui", (ngx_uint_t)pairs[i].id, (ngx_uint_t)pairs[i].val);
+    }
+    
+    // SHA256
+    SHA256_Init(&sha256);
+    SHA256_Update(&sha256, buf, p - buf);
+    SHA256_Final(hash, &sha256);
+    
+    // Truncate Hash (12 chars = 6 bytes hex)
+    ngx_hex_dump((u_char*)ja4s->settings_hash, hash, 6);
+    ja4s->settings_hash[12] = '\0'; 
+    
+    // 4. Construct Final Fingerprint
+    // Format: h2<ProtoVer>_<Count>_<Hash>_<InitWindow>_<ParamOrder?>_<Priority?>
+    
+    ngx_snprintf((u_char*)ja4s->fingerprint, 255, "h220_%02d_%s_%uz_0", 
+                 cnt, 
+                 ja4s->settings_hash,
+                 h2c->init_window); 
+}
 

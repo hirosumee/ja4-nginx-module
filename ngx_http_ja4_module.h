@@ -12,6 +12,7 @@ typedef struct {
     // We can store the raw ja4 struct here
     // Note: We need to define ngx_ssl_ja4_t first, so I'll move this typedef below or forward declare
     struct ngx_ssl_ja4_s *ja4_data; 
+    struct ngx_ssl_ja4s_s *ja4s_data;
 } ngx_ja4_ssl_ctx_t;
 
 
@@ -20,6 +21,7 @@ typedef struct {
     ngx_str_t   ja4_string;
     ngx_str_t   ja4one;
     ngx_str_t   ja4h;
+    ngx_str_t   ja4s;
 } ngx_http_ja4_ctx_t;
 
 // STRUCTS
@@ -59,8 +61,16 @@ typedef struct ngx_ssl_ja4_s
 } ngx_ssl_ja4_t;
 
 typedef struct ngx_ssl_ja4s_s {
-    // keeping placeholders to avoid compilation errors if referenced
-    int dummy;
+    // JA4S = h2<count>_<settings_hash>_<window>_<order>_<priority>
+    uint8_t settings_count;
+    char settings_hash[65];        // SHA256 full hash
+    
+    uint32_t window_increment;
+    
+    char pseudo_order[5];          // e.g., "masp"
+    uint8_t priority_count;
+    
+    char fingerprint[256];         // Final JA4S string
 } ngx_ssl_ja4s_t;
 
 typedef struct ngx_ssl_ja4h_s {
@@ -107,6 +117,7 @@ typedef struct {
     ngx_array_t *rules;      // Array of ngx_http_ja4_rule_t for JA4
     ngx_array_t *rules_h;    // Array of ngx_http_ja4_rule_t for JA4H
     ngx_array_t *rules_one;  // Array of ngx_http_ja4_rule_t for JA4one
+    ngx_array_t *rules_s;    // Array of ngx_http_ja4_rule_t for JA4S
 } ngx_http_ja4_srv_conf_t;
 
 #endif

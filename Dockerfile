@@ -12,7 +12,8 @@ RUN apk add --no-cache \
     zlib-dev \
     wget \
     perl-dev \
-    linux-headers
+    linux-headers \
+    patch
 
 # 1. Download OpenSSL (Standard) - REMOVED, using system openssl-dev
 # RUN wget https://github.com/openssl/openssl/releases/download/openssl-${OPENSSL_VERSION}/openssl-${OPENSSL_VERSION}.tar.gz && \
@@ -36,6 +37,7 @@ WORKDIR /tmp/nginx-${NGINX_VERSION}
     --with-compat \
     --add-dynamic-module=/tmp/ja4_nopatch \
     --with-http_ssl_module \
+    --with-http_v2_module \
     --prefix=/etc/nginx \
     --modules-path=/etc/nginx/modules \
     --with-cc-opt="-Wno-error -O0" \
