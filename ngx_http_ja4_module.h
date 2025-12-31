@@ -13,6 +13,7 @@ typedef struct {
     // Note: We need to define ngx_ssl_ja4_t first, so I'll move this typedef below or forward declare
     struct ngx_ssl_ja4_s *ja4_data; 
     struct ngx_ssl_ja4s_s *ja4s_data;
+    struct ngx_ssl_ja4tcp_s *ja4tcp_data;
 } ngx_ja4_ssl_ctx_t;
 
 
@@ -22,6 +23,7 @@ typedef struct {
     ngx_str_t   ja4one;
     ngx_str_t   ja4h;
     ngx_str_t   ja4s;
+    ngx_str_t   ja4tcp;
 } ngx_http_ja4_ctx_t;
 
 // STRUCTS
@@ -35,14 +37,14 @@ typedef struct ngx_ssl_ja4_s
     unsigned char has_sni; // 'd' if SNI is present, 'i' otherwise
 
     size_t ciphers_sz; // Count of ciphers
-    char **ciphers;    // List of ciphers
+    uint16_t *ciphers;    // List of ciphers
 
     size_t extensions_count; // Count of extensions including ignored extensions
     size_t extensions_sz; // Count of extensions NOT including ignored extensions
-    char **extensions;    // List of extensions
+    uint16_t *extensions;    // List of extensions
 
     size_t extensions_no_psk_count;
-    char **extensions_no_psk;
+    char **extensions_no_psk; // Left as is for now, or could optimize if used
 
     char extension_hash_no_psk[65];
     char extension_hash_no_psk_truncated[13];
@@ -57,8 +59,16 @@ typedef struct ngx_ssl_ja4_s
 
     char extension_hash[65];
     char extension_hash_truncated[13];
+    
+    unsigned int calculated:1;
 
 } ngx_ssl_ja4_t;
+
+typedef struct ngx_ssl_ja4tcp_s {
+    u_char *data;
+    size_t len;
+    unsigned int calculated:1;
+} ngx_ssl_ja4tcp_t;
 
 typedef struct ngx_ssl_ja4s_s {
     // JA4S = h2<count>_<settings_hash>_<window>_<order>_<priority>
@@ -71,6 +81,7 @@ typedef struct ngx_ssl_ja4s_s {
     uint8_t priority_count;
     
     char fingerprint[256];         // Final JA4S string
+    unsigned int calculated:1;
 } ngx_ssl_ja4s_t;
 
 typedef struct ngx_ssl_ja4h_s {
