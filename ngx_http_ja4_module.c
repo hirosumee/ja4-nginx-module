@@ -185,6 +185,7 @@ typedef struct {
 
 
 // Module Directives
+static ngx_command_t ngx_http_ja4_commands[] = {
     { ngx_string("ja4"),
       NGX_HTTP_SRV_CONF|NGX_CONF_FLAG,
       ngx_conf_set_flag_slot,
@@ -276,14 +277,8 @@ static ngx_int_t ngx_http_ja4_init(ngx_conf_t *cf) {
         return NGX_ERROR;
     }
 
-    // 2. Add Access Phase Handler (REMOVED)
-    // cmcf = ngx_http_conf_get_module_main_conf(cf, ngx_http_core_module);
-    
-    // h = ngx_array_push(&cmcf->phases[NGX_HTTP_ACCESS_PHASE].handlers);
-    // if (h == NULL) {
-    //     return NGX_ERROR;
-    // }
-    // *h = ngx_http_ja4_access_handler;
+    // 2. Get main config (needed for server iteration below)
+    cmcf = ngx_http_conf_get_module_main_conf(cf, ngx_http_core_module);
 
     // 3. Iterate servers and add ClientHello Callback
     cscfp = cmcf->servers.elts;
