@@ -77,69 +77,90 @@ static int compare_uint16(const void *a, const void *b) {
 
 
 // Client Hello Callback
-// This replaces the patch logic
+// Called via ngx_ssl_fp_extra_client_hello_cb global hook from JA3 callback
 int ngx_ja4_client_hello_cb(SSL *s, int *al, void *arg) {
     ngx_connection_t *c;
     ngx_ja4_ssl_ctx_t *ctx;
-    int *ext_out;
-    size_t ext_len;
-    
+    int *ext_out = NULL;
+    size_t ext_len = 0;
+
     c = SSL_get_ex_data(s, ngx_ssl_connection_index);
-    if (c == NULL) {
+    if (c == NULL || c->pool == NULL) {
         return 1;
     }
 
-    // Allocate our context
+    /* Allocate our context */
     ctx = ngx_pcalloc(c->pool, sizeof(ngx_ja4_ssl_ctx_t));
-    if (ctx == NULL) return 0; // Error
+    if (ctx == NULL) {
+        ngx_log_error(NGX_LOG_ERR, c->log, 0,
+                      "ja4: pcalloc ctx failed");
+        return 1;
+    }
 
     ctx->pool = c->pool;
     ctx->ja4_data = ngx_pcalloc(c->pool, sizeof(ngx_ssl_ja4_t));
-    if (ctx->ja4_data == NULL) return 0;
+    if (ctx->ja4_data == NULL) {
+        ngx_log_error(NGX_LOG_ERR, c->log, 0,
+                      "ja4: pcalloc ja4_data failed");
+        return 1;
+    }
 
     SSL_set_ex_data(s, ngx_ja4_ssl_ex_index, ctx);
 
-    // --- LOGIC PORTED FROM PATCH ---
+    /* Get extension list from ClientHello */
     if (!SSL_client_hello_get1_extensions_present(s, &ext_out, &ext_len)) {
+        ngx_log_error(NGX_LOG_WARN, c->log, 0,
+                      "ja4: get1_extensions_present failed");
         return 1;
     }
-    if (!ext_out || !ext_len) { 
-         if(ext_out) OPENSSL_free(ext_out);
-         return 1; 
+    if (ext_out == NULL || ext_len == 0) {
+        if (ext_out) OPENSSL_free(ext_out);
+        return 1;
     }
 
-    // Store raw extensions in our struct
-    
+    /* Store raw extensions */
     ctx->ja4_data->extensions_sz = ext_len;
-    ctx->ja4_data->extensions = ngx_pcalloc(c->pool, sizeof(uint16_t) * ext_len);
-    
-    // Also capture highest version
+    ctx->ja4_data->extensions = ngx_pcalloc(c->pool,
+                                            sizeof(uint16_t) * ext_len);
+    if (ctx->ja4_data->extensions == NULL) {
+        ngx_log_error(NGX_LOG_ERR, c->log, 0,
+                      "ja4: pcalloc extensions (%uz) failed", ext_len);
+        ctx->ja4_data->extensions_sz = 0;
+        OPENSSL_free(ext_out);
+        return 1;
+    }
+
+    /* Copy extensions and detect highest TLS version */
     int highest_ver = 0;
 
     for (size_t i = 0; i < ext_len; i++) {
         ctx->ja4_data->extensions[i] = (uint16_t)ext_out[i];
 
-        // Supported Versions logic (0x002b)
+        /* Supported Versions extension (0x002b) */
         if (ext_out[i] == 0x002b) {
-             const unsigned char *ver_data;
-             size_t ver_len;
-             if (SSL_client_hello_get0_ext(s, 0x002b, &ver_data, &ver_len) && ver_len >= 3) {
-                 size_t list_len = ver_data[0];
-                 const unsigned char *p = ver_data + 1;
-                 for (size_t j = 0; j + 1 < list_len && (j+1 < ver_len); j += 2) {
-                     int v = (p[j] << 8) | p[j+1];
-                     if ((v & 0x0f0f) == 0x0a0a) continue; // Grease
-                     if (v > highest_ver) highest_ver = v;
-                 }
-             }
+            const unsigned char *ver_data = NULL;
+            size_t ver_len = 0;
+            if (SSL_client_hello_get0_ext(s, 0x002b, &ver_data, &ver_len)
+                && ver_data != NULL && ver_len >= 3)
+            {
+                size_t list_len = ver_data[0];
+                const unsigned char *p = ver_data + 1;
+                size_t j;
+                for (j = 0; j + 1 < list_len && (j + 1 < ver_len); j += 2) {
+                    int v = (p[j] << 8) | p[j + 1];
+                    if ((v & 0x0f0f) == 0x0a0a) continue; /* GREASE */
+                    if (v > highest_ver) highest_ver = v;
+                }
+            }
         }
     }
-    
+
     if (highest_ver == 0) {
         highest_ver = SSL_client_hello_get0_legacy_version(s);
     }
-    
-    ctx->ja4_data->highest_supported_tls_client_version = (char*)(uintptr_t)highest_ver; 
+
+    ctx->ja4_data->highest_supported_tls_client_version =
+        (char *)(uintptr_t)highest_ver;
     ctx->ja4_data->calculated = 0;
 
     OPENSSL_free(ext_out);
@@ -280,16 +301,20 @@ static ngx_int_t ngx_http_ja4_init(ngx_conf_t *cf) {
     // 2. Get main config (needed for server iteration below)
     cmcf = ngx_http_conf_get_module_main_conf(cf, ngx_http_core_module);
 
-    // 3. Iterate servers and add ClientHello Callback
-    cscfp = cmcf->servers.elts;
-
-    for (s = 0; s < cmcf->servers.nelts; s++) {
-         ngx_http_ssl_srv_conf_t *sscf = cscfp[s]->ctx->srv_conf[ngx_http_ssl_module.ctx_index];
-         
-         if (sscf && sscf->ssl.ctx) {
-             SSL_CTX_set_client_hello_cb(sscf->ssl.ctx, ngx_ja4_client_hello_cb, NULL);
-         }
+    // 3. Register ClientHello callback via nginx-ssl-fingerprint's global hook.
+    //    This avoids the SSL_CTX_set_client_hello_cb overwrite problem:
+    //    the JA3 patch sets its callback at every handshake, which would
+    //    overwrite any callback set here at config time.  Instead, JA3's
+    //    callback invokes this hook in the same OpenSSL callback context.
+    {
+        extern int (*ngx_ssl_fp_extra_client_hello_cb)(SSL *, int *, void *);
+        ngx_ssl_fp_extra_client_hello_cb = ngx_ja4_client_hello_cb;
     }
+
+    (void) cmcf;
+    (void) s;
+    (void) cscfp;
+
     return NGX_OK;
 }
 
